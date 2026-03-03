@@ -250,7 +250,50 @@ body { background: var(--bg); color: var(--text); font-family: 'Courier New', mo
 
 select.input-dark option { background: #0a0a15; }
 textarea.input-dark { resize: vertical; min-height: 120px; }
+
+/* ── LIGHT THEME ── */
+body.light-theme {
+  --bg: #f0f4ff;
+  --bg2: #e4eaff;
+  --bg3: #d8e0ff;
+  --card: rgba(255,255,255,0.92);
+  --border: rgba(79,195,247,0.35);
+  --border-bright: rgba(79,195,247,0.6);
+  --text: #0a0a1a;
+  --text-dim: #4a5a7a;
+}
+body.light-theme .panel { box-shadow: 0 2px 16px rgba(79,195,247,0.08), 0 1px 4px rgba(0,0,0,0.08); }
+body.light-theme .input-dark { background: rgba(240,244,255,0.9); color: #0a0a1a; }
+body.light-theme .modal-box { background: #f0f4ff; }
+
+/* ── BOSS FIGHT ── */
+@keyframes bossShake {
+  0%,100% { transform: translateX(0); }
+  20% { transform: translateX(-8px); }
+  40% { transform: translateX(8px); }
+  60% { transform: translateX(-5px); }
+  80% { transform: translateX(5px); }
+}
+@keyframes bossHit {
+  0% { filter: brightness(1); }
+  50% { filter: brightness(3) saturate(0); }
+  100% { filter: brightness(1); }
+}
+@keyframes bossFloat {
+  0%,100% { transform: translateY(0px); }
+  50% { transform: translateY(-12px); }
+}
+.boss-anim { animation: bossFloat 3s ease-in-out infinite; }
+.boss-hit { animation: bossHit 0.3s ease-out, bossShake 0.4s ease-out; }
+
+/* ── RANK CARD ── */
+@keyframes cardReveal {
+  from { opacity:0; transform: scale(0.85) translateY(20px); }
+  to { opacity:1; transform: scale(1) translateY(0); }
+}
+.rank-card-reveal { animation: cardReveal 0.5s cubic-bezier(0.34,1.56,0.64,1) forwards; }
 `;
+
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 const RANKS = ['E','D','C','B','A','S','MONARCH'];
@@ -355,6 +398,12 @@ const buildInitialState = () => ({
   screenTime:{ dailyLimit:120, todayUsage:0, sessions:[], lastDate:'' },
   achievements:[], settings:{ theme:'dark' },
   ownedRewards: [],
+  customRewards: [],
+  collection: [],
+  antiTodo: [],
+  theme: 'dark',
+  notifications: { enabled: false, time: '08:00', permission: 'default' },
+  bosses: [],
   onboarded: false,
   assessmentAnswers: {}
 });
@@ -387,12 +436,43 @@ function reducer(state, action) {
         _leveled: leveled ? { level, rank:newRank, title } : null };
     }
     case 'PURCHASE_REWARD': {
-      const { id, cost } = action.payload;
+      const { id, cost, item } = action.payload;
       if ((state.hunter.coins||0) < cost) return state;
+      const collectionEntry = item ? { ...item, acquiredAt: Date.now(), source: 'purchase' } : null;
       return { ...state,
         hunter: { ...state.hunter, coins: (state.hunter.coins||0) - cost },
-        ownedRewards: [...(state.ownedRewards||[]), id]
+        ownedRewards: [...(state.ownedRewards||[]), id],
+        collection: collectionEntry ? [...(state.collection||[]), collectionEntry] : (state.collection||[])
       };
+    }
+    case 'ADD_CUSTOM_REWARD': {
+      const r = { id: 'cr_'+Date.now(), ...action.payload, createdAt: Date.now() };
+      return { ...state, customRewards: [...(state.customRewards||[]), r] };
+    }
+    case 'DELETE_CUSTOM_REWARD': {
+      return { ...state, customRewards: (state.customRewards||[]).filter(r=>r.id!==action.payload) };
+    }
+    case 'CLAIM_CUSTOM_REWARD': {
+      const { rewardId } = action.payload;
+      const reward = (state.customRewards||[]).find(r=>r.id===rewardId);
+      if (!reward) return state;
+      const entry = { ...reward, acquiredAt: Date.now(), source: 'quest_reward' };
+      return { ...state, collection: [...(state.collection||[]), entry] };
+    }
+    case 'ADD_ANTI_TODO': {
+      const item = { id: 'at_'+Date.now(), ...action.payload, createdAt: Date.now(), breakCount: 0 };
+      return { ...state, antiTodo: [...(state.antiTodo||[]), item] };
+    }
+    case 'DELETE_ANTI_TODO': {
+      return { ...state, antiTodo: (state.antiTodo||[]).filter(a=>a.id!==action.payload) };
+    }
+    case 'BREAK_ANTI_TODO': {
+      const antiTodo = (state.antiTodo||[]).map(a => a.id===action.payload ? {...a, breakCount:(a.breakCount||0)+1, lastBroken:Date.now()} : a);
+      return { ...state, antiTodo };
+    }
+    case 'KEEP_ANTI_TODO': {
+      const antiTodo = (state.antiTodo||[]).map(a => a.id===action.payload ? {...a, lastKept:Date.now(), streak:(a.streak||0)+1} : a);
+      return { ...state, antiTodo };
     }
     case 'EQUIP_REWARD': {
       const { type, value } = action.payload;
@@ -401,30 +481,81 @@ function reducer(state, action) {
     case 'RESET_ALL': {
       return { ...buildInitialState() };
     }
+    case 'SET_THEME': {
+      return { ...state, theme: action.payload };
+    }
+    case 'SET_NOTIFICATIONS': {
+      return { ...state, notifications: { ...state.notifications, ...action.payload } };
+    }
+    case 'ADD_BOSS': {
+      const boss = { id: Date.now()+'', ...action.payload, currentHp: action.payload.maxHp, defeated: false, dateCreated: Date.now() };
+      return { ...state, bosses: [...(state.bosses||[]), boss] };
+    }
+    case 'ATTACK_BOSS': {
+      const { id, damage } = action.payload;
+      const bosses = (state.bosses||[]).map(b => {
+        if (b.id !== id) return b;
+        const newHp = Math.max(0, b.currentHp - damage);
+        return { ...b, currentHp: newHp, defeated: newHp === 0 };
+      });
+      return { ...state, bosses };
+    }
+    case 'DELETE_BOSS': {
+      return { ...state, bosses: (state.bosses||[]).filter(b => b.id !== action.payload) };
+    }
     case 'GAIN_STAT': {
       const { stat, amount } = action.payload;
       return { ...state, stats:{...state.stats, [stat]: (state.stats[stat]||1) + amount } };
     }
     case 'COMPLETE_DAILY_QUEST': {
       const today = todayStr();
+      const quest = state.quests.daily.find(q => q.id === action.payload);
       const quests = state.quests.daily.map(q =>
         q.id === action.payload ? {...q, completed:true, date:today} : q
       );
-      return { ...state, quests:{...state.quests, daily:quests} };
+      let newState = { ...state, quests:{...state.quests, daily:quests} };
+      // Award stat if quest has one
+      if (quest?.statReward && quest.statAmount) {
+        newState = { ...newState, stats:{ ...newState.stats, [quest.statReward]: (newState.stats[quest.statReward]||1) + quest.statAmount } };
+      }
+      // Claim associated reward
+      if (quest?.rewardId) {
+        const reward = state.customRewards?.find(r=>r.id===quest.rewardId);
+        if (reward) newState = { ...newState, collection: [...(newState.collection||[]), { ...reward, acquiredAt:Date.now(), source:'quest_reward', questName:quest.name }] };
+      }
+      return newState;
     }
     case 'COMPLETE_WEEKLY_QUEST': {
+      const quest = state.quests.weekly.find(q => q.id === action.payload);
       const quests = state.quests.weekly.map(q =>
         q.id === action.payload ? {...q, completed:true} : q
       );
-      return { ...state, quests:{...state.quests, weekly:quests} };
+      let newState = { ...state, quests:{...state.quests, weekly:quests} };
+      if (quest?.statReward && quest.statAmount) {
+        newState = { ...newState, stats:{ ...newState.stats, [quest.statReward]: (newState.stats[quest.statReward]||1) + quest.statAmount } };
+      }
+      if (quest?.rewardId) {
+        const reward = state.customRewards?.find(r=>r.id===quest.rewardId);
+        if (reward) newState = { ...newState, collection: [...(newState.collection||[]), { ...reward, acquiredAt:Date.now(), source:'quest_reward', questName:quest.name }] };
+      }
+      return newState;
     }
     case 'ADD_MAIN_QUEST': {
       const q = { id: Date.now()+'', ...action.payload, completed:false, progress:0 };
       return { ...state, quests:{...state.quests, main:[...state.quests.main, q]} };
     }
     case 'COMPLETE_MAIN_QUEST': {
+      const quest = state.quests.main.find(q => q.id===action.payload);
       const main = state.quests.main.map(q => q.id===action.payload ? {...q,completed:true} : q);
-      return { ...state, quests:{...state.quests, main} };
+      let newState = { ...state, quests:{...state.quests, main} };
+      if (quest?.statReward && quest.statAmount) {
+        newState = { ...newState, stats:{ ...newState.stats, [quest.statReward]: (newState.stats[quest.statReward]||1) + quest.statAmount } };
+      }
+      if (quest?.rewardId) {
+        const reward = state.customRewards?.find(r=>r.id===quest.rewardId);
+        if (reward) newState = { ...newState, collection: [...(newState.collection||[]), { ...reward, acquiredAt:Date.now(), source:'quest_reward', questName:quest.name }] };
+      }
+      return newState;
     }
     case 'ADD_DAILY_QUEST': {
       const q = { id: 'custom_'+Date.now(), ...action.payload, completed:false, date:'' };
@@ -1188,27 +1319,77 @@ function QuestsScreen({ state, dispatch, addXP, showNotif }) {
   const [tab, setTab] = useState('daily');
   const [showAddMain, setShowAddMain] = useState(false);
   const [showAddDaily, setShowAddDaily] = useState(false);
-  const [newQuest, setNewQuest] = useState({ name:'', xp:100, target:1, desc:'' });
+  const [newQuest, setNewQuest] = useState({ name:'', xp:100, target:1, desc:'', statReward:'', statAmount:1, rewardId:'' });
   const today = todayStr();
 
   const completeDaily = (q) => {
     if (q.completed) return;
     dispatch({ type:'COMPLETE_DAILY_QUEST', payload:q.id });
     addXP(q.xp, 'quest');
-    showNotif('QUEST CLEARED');
+    const msgs = ['QUEST CLEARED'];
+    if (q.statReward) msgs.push(`+${q.statAmount||1} ${q.statReward.toUpperCase().slice(0,3)}`);
+    if (q.rewardId) msgs.push('🎁 REWARD EARNED');
+    showNotif(msgs.join(' · '));
   };
   const completeWeekly = (q) => {
     if (q.completed) return;
     dispatch({ type:'COMPLETE_WEEKLY_QUEST', payload:q.id });
     addXP(q.xp, 'quest');
-    showNotif('WEEKLY QUEST CLEARED');
+    showNotif('WEEKLY QUEST CLEARED' + (q.statReward ? ` · +${q.statAmount||1} ${q.statReward.slice(0,3).toUpperCase()}` : ''));
   };
   const completeMain = (q) => {
     if (q.completed) return;
     dispatch({ type:'COMPLETE_MAIN_QUEST', payload:q.id });
     addXP(q.xp, 'quest');
-    showNotif('MAIN QUEST COMPLETE!');
+    showNotif('MAIN QUEST COMPLETE!' + (q.rewardId ? ' 🎁 REWARD EARNED' : ''));
   };
+
+  const STAT_OPTIONS = [
+    { value:'', label:'None' },
+    { value:'strength', label:'⚔️ Strength' },
+    { value:'intelligence', label:'📚 Intelligence' },
+    { value:'discipline', label:'🎯 Discipline' },
+    { value:'vitality', label:'❤️ Vitality' },
+    { value:'focus', label:'⚡ Focus' },
+    { value:'charisma', label:'🌟 Charisma' },
+  ];
+
+  const customRewards = state.customRewards || [];
+
+  const QuestExtrasForm = () => (
+    <>
+      {/* Stat Reward */}
+      <div style={{ marginBottom:12 }}>
+        <label style={{ display:'block', fontSize:11, color:'var(--text-dim)', marginBottom:6 }}>STAT REWARD ON COMPLETION</label>
+        <div style={{ display:'flex', gap:8 }}>
+          <select className="input-dark" value={newQuest.statReward} onChange={e=>setNewQuest(p=>({...p,statReward:e.target.value}))} style={{ flex:2 }}>
+            {STAT_OPTIONS.map(o=><option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+          {newQuest.statReward && (
+            <input className="input-dark" type="number" min={1} max={99} value={newQuest.statAmount}
+              onChange={e=>setNewQuest(p=>({...p,statAmount:Math.max(1,+e.target.value||1)}))}
+              style={{ flex:1, padding:'8px 10px' }} placeholder="+amt"/>
+          )}
+        </div>
+      </div>
+      {/* Reward Association */}
+      {customRewards.length > 0 && (
+        <div style={{ marginBottom:12 }}>
+          <label style={{ display:'block', fontSize:11, color:'var(--text-dim)', marginBottom:6 }}>LINKED REAL-WORLD REWARD</label>
+          <select className="input-dark" value={newQuest.rewardId} onChange={e=>setNewQuest(p=>({...p,rewardId:e.target.value}))}>
+            <option value="">None</option>
+            {customRewards.map(r=><option key={r.id} value={r.id}>{r.emoji} {r.name}</option>)}
+          </select>
+          <div style={{ fontSize:10, color:'var(--text-dim)', marginTop:4 }}>You'll earn this reward when quest is completed.</div>
+        </div>
+      )}
+      {customRewards.length === 0 && (
+        <div style={{ fontSize:11, color:'var(--text-dim)', marginBottom:12, padding:'8px 12px', border:'1px solid var(--border)', borderRadius:6, background:'rgba(79,195,247,0.03)' }}>
+          💡 Create custom rewards in the Rewards → Custom tab to link them to quests.
+        </div>
+      )}
+    </>
+  );
 
   const TABS = [
     { k:'daily', label:'Daily', icon:'⚡' },
@@ -1240,7 +1421,7 @@ function QuestsScreen({ state, dispatch, addXP, showNotif }) {
               ⚡ Resets at midnight — Daily Dungeon
             </div>
             {state.quests.daily.map(q=>(
-              <QuestCard key={q.id} quest={q} completed={q.completed && q.date===today} onComplete={()=>completeDaily(q)} color="var(--mana)"/>
+              <QuestCard key={q.id} quest={q} completed={q.completed && q.date===today} onComplete={()=>completeDaily(q)} color="var(--mana)" customRewards={customRewards}/>
             ))}
             <button className="btn-mana" onClick={()=>setShowAddDaily(true)} style={{ width:'100%', marginTop:8 }}>
               + ADD CUSTOM DAILY QUEST
@@ -1253,7 +1434,7 @@ function QuestsScreen({ state, dispatch, addXP, showNotif }) {
               📅 Weekly Gate — Clears every Sunday
             </div>
             {state.quests.weekly.map(q=>(
-              <QuestCard key={q.id} quest={q} completed={q.completed} onComplete={()=>completeWeekly(q)} color="var(--violet)" showProgress/>
+              <QuestCard key={q.id} quest={q} completed={q.completed} onComplete={()=>completeWeekly(q)} color="var(--violet)" showProgress customRewards={customRewards}/>
             ))}
           </>
         )}
@@ -1268,7 +1449,7 @@ function QuestsScreen({ state, dispatch, addXP, showNotif }) {
               </div>
             )}
             {state.quests.main.map(q=>(
-              <QuestCard key={q.id} quest={q} completed={q.completed} onComplete={()=>completeMain(q)} color="var(--gold)"/>
+              <QuestCard key={q.id} quest={q} completed={q.completed} onComplete={()=>completeMain(q)} color="var(--gold)" customRewards={customRewards}/>
             ))}
             <button className="btn-gold" onClick={()=>setShowAddMain(true)} style={{ width:'100%', marginTop:8 }}>
               + DEFINE MAIN QUEST
@@ -1299,11 +1480,12 @@ function QuestsScreen({ state, dispatch, addXP, showNotif }) {
                 <input className="input-dark" value={newQuest[f.k]} onChange={e=>setNewQuest(p=>({...p,[f.k]:e.target.value}))} placeholder={f.ph}/>
               </div>
             ))}
-            <div style={{ display:'flex', gap:8, marginTop:16 }}>
+            <QuestExtrasForm/>
+            <div style={{ display:'flex', gap:8, marginTop:8 }}>
               <button className="btn-mana" style={{ flex:1 }} onClick={()=>{
                 if(!newQuest.name) return;
-                dispatch({type:'ADD_MAIN_QUEST', payload:{name:newQuest.name, desc:newQuest.desc, xp:+newQuest.xp||100}});
-                setNewQuest({name:'',xp:100,target:1,desc:''});
+                dispatch({type:'ADD_MAIN_QUEST', payload:{name:newQuest.name, desc:newQuest.desc, xp:+newQuest.xp||100, statReward:newQuest.statReward, statAmount:+newQuest.statAmount||1, rewardId:newQuest.rewardId}});
+                setNewQuest({name:'',xp:100,target:1,desc:'',statReward:'',statAmount:1,rewardId:''});
                 setShowAddMain(false);
               }}>CREATE QUEST</button>
               <button className="btn-danger" onClick={()=>setShowAddMain(false)}>CANCEL</button>
@@ -1322,11 +1504,12 @@ function QuestsScreen({ state, dispatch, addXP, showNotif }) {
                 <input className="input-dark" value={newQuest[f.k]} onChange={e=>setNewQuest(p=>({...p,[f.k]:e.target.value}))} placeholder={f.ph}/>
               </div>
             ))}
-            <div style={{ display:'flex', gap:8, marginTop:16 }}>
+            <QuestExtrasForm/>
+            <div style={{ display:'flex', gap:8, marginTop:8 }}>
               <button className="btn-mana" style={{ flex:1 }} onClick={()=>{
                 if(!newQuest.name) return;
-                dispatch({type:'ADD_DAILY_QUEST', payload:{name:newQuest.name, xp:+newQuest.xp||50, category:'custom'}});
-                setNewQuest({name:'',xp:50,target:1,desc:''});
+                dispatch({type:'ADD_DAILY_QUEST', payload:{name:newQuest.name, xp:+newQuest.xp||50, category:'custom', statReward:newQuest.statReward, statAmount:+newQuest.statAmount||1, rewardId:newQuest.rewardId}});
+                setNewQuest({name:'',xp:50,target:1,desc:'',statReward:'',statAmount:1,rewardId:''});
                 setShowAddDaily(false);
               }}>ADD QUEST</button>
               <button className="btn-danger" onClick={()=>setShowAddDaily(false)}>CANCEL</button>
@@ -1338,7 +1521,8 @@ function QuestsScreen({ state, dispatch, addXP, showNotif }) {
   );
 }
 
-function QuestCard({ quest, completed, onComplete, color, showProgress }) {
+function QuestCard({ quest, completed, onComplete, color, showProgress, customRewards }) {
+  const linkedReward = customRewards && quest.rewardId ? customRewards.find(r=>r.id===quest.rewardId) : null;
   return (
     <div className="panel" style={{
       padding:14, marginBottom:10, borderColor: completed ? 'rgba(79,195,247,0.1)' : `${color}33`,
@@ -1359,6 +1543,19 @@ function QuestCard({ quest, completed, onComplete, color, showProgress }) {
             {quest.name}
           </div>
           {quest.desc && <div style={{ fontSize:11, color:'var(--text-dim)', marginTop:2 }}>{quest.desc}</div>}
+          {/* Rewards row */}
+          <div style={{ display:'flex', gap:6, marginTop:4, flexWrap:'wrap' }}>
+            {quest.statReward && (
+              <span style={{ fontSize:9, color:STAT_COLORS[quest.statReward]||'var(--mana)', border:`1px solid ${STAT_COLORS[quest.statReward]||'var(--mana)'}44`, borderRadius:3, padding:'1px 5px', letterSpacing:1 }}>
+                +{quest.statAmount||1} {STAT_LABELS[quest.statReward]||quest.statReward.toUpperCase().slice(0,3)}
+              </span>
+            )}
+            {linkedReward && (
+              <span style={{ fontSize:9, color:'var(--gold)', border:'1px solid rgba(243,156,18,0.4)', borderRadius:3, padding:'1px 5px' }}>
+                🎁 {linkedReward.emoji} {linkedReward.name}
+              </span>
+            )}
+          </div>
         </div>
         <div className="cinzel" style={{ fontSize:12, color:'var(--gold)', flexShrink:0 }}>+{quest.xp} XP</div>
       </div>
@@ -1398,17 +1595,20 @@ function BodyScreen({ state, dispatch, addXP }) {
   const [view, setView] = useState('front');
   const [tooltip, setTooltip] = useState(null);
   const [modalMuscle, setModalMuscle] = useState(null);
+  const [showAssistant, setShowAssistant] = useState(false);
   const [workoutForm, setWorkoutForm] = useState({ exercise:'', sets:3, reps:10, weight:'' });
 
   const handleMuscleTap = (muscleName) => { setModalMuscle(muscleName); };
 
-  const logWorkout = () => {
-    if (!workoutForm.exercise) return;
-    const xpGain = 50 + (workoutForm.weight ? Math.floor(workoutForm.weight/10)*5 : 0);
-    dispatch({ type:'LOG_WORKOUT', payload:{ muscleName:modalMuscle, xpGain, entry:{ ...workoutForm } } });
+  const logWorkout = (form) => {
+    const f = form || workoutForm;
+    if (!f.exercise) return;
+    const xpGain = 50 + (f.weight ? Math.floor(f.weight/10)*5 : 0);
+    dispatch({ type:'LOG_WORKOUT', payload:{ muscleName:modalMuscle, xpGain, entry:{ ...f } } });
     addXP(xpGain + 50, 'workout');
     dispatch({ type:'GAIN_STAT', payload:{ stat:'strength', amount:1 } });
     setModalMuscle(null);
+    setShowAssistant(false);
     setWorkoutForm({ exercise:'', sets:3, reps:10, weight:'' });
   };
 
@@ -1540,13 +1740,21 @@ function BodyScreen({ state, dispatch, addXP }) {
       )}
 
       {/* Log Modal */}
-      {modalMuscle && (
+      {modalMuscle && !showAssistant && (
         <div className="modal-overlay" onClick={()=>setModalMuscle(null)}>
           <div className="modal-box" onClick={e=>e.stopPropagation()}>
             <div className="cinzel" style={{ color:'var(--mana)', fontSize:16, marginBottom:4 }}>LOG WORKOUT</div>
-            <div style={{ fontSize:12, color:'var(--text-dim)', marginBottom:16 }}>
+            <div style={{ fontSize:12, color:'var(--text-dim)', marginBottom:12 }}>
               {MUSCLE_NAMES[modalMuscle]||modalMuscle} — Lv.{muscle?.level||0} | {muscle?.trained||0} sessions
             </div>
+            {/* Workout Assistant CTA */}
+            <button onClick={()=>setShowAssistant(true)} style={{
+              width:'100%', padding:'10px', marginBottom:16, borderRadius:8, cursor:'pointer',
+              background:'rgba(155,89,182,0.12)', border:'1px solid rgba(155,89,182,0.4)',
+              color:'var(--violet)', fontSize:12, fontFamily:'Cinzel,serif', letterSpacing:1
+            }}>
+              💡 GET EXERCISE SUGGESTIONS →
+            </button>
             <div style={{ marginBottom:12 }}>
               <label style={{ fontSize:11, color:'var(--text-dim)', display:'block', marginBottom:6 }}>EXERCISE NAME</label>
               <input className="input-dark" value={workoutForm.exercise} onChange={e=>setWorkoutForm(p=>({...p,exercise:e.target.value}))} placeholder="Bench Press, Curls..."/>
@@ -1560,11 +1768,21 @@ function BodyScreen({ state, dispatch, addXP }) {
               ))}
             </div>
             <div style={{ display:'flex', gap:8 }}>
-              <button className="btn-gold" style={{ flex:1 }} onClick={logWorkout}>LOG WORKOUT ⚡</button>
+              <button className="btn-gold" style={{ flex:1 }} onClick={()=>logWorkout()}>LOG WORKOUT ⚡</button>
               <button className="btn-danger" onClick={()=>setModalMuscle(null)}>CANCEL</button>
             </div>
           </div>
         </div>
+      )}
+
+      {/* Workout Assistant */}
+      {modalMuscle && showAssistant && (
+        <WorkoutAssistant
+          muscleName={modalMuscle}
+          muscleData={state.muscles[modalMuscle]}
+          onClose={()=>setShowAssistant(false)}
+          onLogWorkout={(form)=>logWorkout(form)}
+        />
       )}
     </div>
   );
@@ -1883,11 +2101,12 @@ function HabitsScreen({ state, dispatch, addXP, showNotif }) {
               </select>
             </div>
             <div style={{ marginBottom:16 }}>
-              <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, color:'var(--text-dim)', marginBottom:6 }}>
-                <span>XP per completion</span><span style={{ color:'var(--gold)' }}>{newHabit.xpPerCompletion} XP</span>
+                <label style={{ fontSize:11, color:'var(--text-dim)', display:'block', marginBottom:6 }}>XP PER COMPLETION (any amount)</label>
+                <input className="input-dark" type="number" min={1} value={newHabit.xpPerCompletion}
+                  onChange={e=>setNewHabit(p=>({...p,xpPerCompletion:Math.max(1,+e.target.value||1)}))}
+                  placeholder="Enter XP reward..."/>
+                <div style={{ fontSize:10, color:'var(--text-dim)', marginTop:4 }}>No limit — set any XP value you feel is fair</div>
               </div>
-              <input type="range" min={10} max={150} step={5} value={newHabit.xpPerCompletion} onChange={e=>setNewHabit(p=>({...p,xpPerCompletion:+e.target.value}))} style={{ width:'100%', accentColor:'var(--gold)' }}/>
-            </div>
             <div style={{ display:'flex', gap:8 }}>
               <button className="btn-mana" style={{ flex:1 }} onClick={()=>{
                 if(!newHabit.name) return;
@@ -1913,7 +2132,8 @@ function RoutineScreen({ state, dispatch, addXP, showNotif }) {
   const [runIdx, setRunIdx] = useState(0);
   const [timer, setTimer] = useState(0);
   const [showAdd, setShowAdd] = useState(false);
-  const [newTask, setNewTask] = useState({ name:'', duration:5, category:'General', icon:'⚡' });
+  const [newTask, setNewTask] = useState({ name:'', duration:5, category:'General', icon:'⚡', xp:50 });
+  const [routineXP, setRoutineXP] = useState(150);
   const intervalRef = useRef(null);
 
   const routine = state.routines[which];
@@ -1932,8 +2152,8 @@ function RoutineScreen({ state, dispatch, addXP, showNotif }) {
             } else {
               clearInterval(intervalRef.current);
               setRunning(false);
-              addXP(150, 'routine');
-              showNotif('ROUTINE CLEARED! +150 XP');
+              addXP(routineXP, 'routine');
+              showNotif(`ROUTINE CLEARED! +${routineXP} XP`);
               return 0;
             }
           }
@@ -2003,9 +2223,17 @@ function RoutineScreen({ state, dispatch, addXP, showNotif }) {
         ))}
         <button className="btn-mana" onClick={()=>setShowAdd(true)} style={{ width:'100%', marginBottom:12 }}>+ ADD TASK</button>
         {routine.length > 0 && (
-          <button className="btn-gold" onClick={startRoutine} style={{ width:'100%', padding:'14px', fontSize:14 }}>
-            ▶ BEGIN {which.toUpperCase()} ROUTINE
-          </button>
+          <>
+            <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:10 }}>
+              <label style={{ fontSize:11, color:'var(--text-dim)', whiteSpace:'nowrap' }}>ROUTINE XP REWARD:</label>
+              <input className="input-dark" type="number" min={1} value={routineXP}
+                onChange={e=>setRoutineXP(Math.max(1,+e.target.value||1))}
+                style={{ padding:'6px 10px', fontSize:13 }}/>
+            </div>
+            <button className="btn-gold" onClick={startRoutine} style={{ width:'100%', padding:'14px', fontSize:14 }}>
+              ▶ BEGIN {which.toUpperCase()} ROUTINE
+            </button>
+          </>
         )}
       </div>
 
@@ -2019,17 +2247,25 @@ function RoutineScreen({ state, dispatch, addXP, showNotif }) {
                 <input className="input-dark" value={newTask[f.k]} onChange={e=>setNewTask(p=>({...p,[f.k]:e.target.value}))} placeholder={f.ph}/>
               </div>
             ))}
-            <div style={{ marginBottom:12 }}>
-              <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, color:'var(--text-dim)', marginBottom:6 }}>
-                <span>Duration</span><span style={{ color:'var(--mana)' }}>{newTask.duration} min</span>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:16 }}>
+              <div>
+                <label style={{ fontSize:11, color:'var(--text-dim)', display:'block', marginBottom:6 }}>DURATION (min)</label>
+                <input className="input-dark" type="number" min={1} value={newTask.duration}
+                  onChange={e=>setNewTask(p=>({...p,duration:Math.max(1,+e.target.value||1)}))}
+                  style={{ padding:'8px 10px' }}/>
               </div>
-              <input type="range" min={1} max={60} value={newTask.duration} onChange={e=>setNewTask(p=>({...p,duration:+e.target.value}))} style={{ width:'100%', accentColor:'var(--mana)' }}/>
+              <div>
+                <label style={{ fontSize:11, color:'var(--text-dim)', display:'block', marginBottom:6 }}>XP REWARD</label>
+                <input className="input-dark" type="number" min={1} value={newTask.xp||50}
+                  onChange={e=>setNewTask(p=>({...p,xp:Math.max(1,+e.target.value||1)}))}
+                  style={{ padding:'8px 10px' }}/>
+              </div>
             </div>
             <div style={{ display:'flex', gap:8 }}>
               <button className="btn-mana" style={{ flex:1 }} onClick={()=>{
                 if(!newTask.name) return;
                 dispatch({ type:'ADD_ROUTINE_TASK', payload:{ routine:which, task:newTask } });
-                setNewTask({ name:'', duration:5, category:'General', icon:'⚡' });
+                setNewTask({ name:'', duration:5, category:'General', icon:'⚡', xp:50 });
                 setShowAdd(false);
               }}>ADD TASK</button>
               <button className="btn-danger" onClick={()=>setShowAdd(false)}>CANCEL</button>
@@ -2336,23 +2572,25 @@ function RewardsScreen({ state, dispatch, addXP, showNotif }) {
   const [cat, setCat] = useState('Titles');
   const [confirmItem, setConfirmItem] = useState(null);
   const [justBought, setJustBought] = useState(null);
+  const [showCreateReward, setShowCreateReward] = useState(false);
+  const [newReward, setNewReward] = useState({ name:'', emoji:'🎁', desc:'', type:'real' });
   const owned = state.ownedRewards || [];
   const coins = state.hunter.coins || 0;
   const hunterRank = state.hunter.rank;
+  const customRewards = state.customRewards || [];
 
-  const CATS = ['Titles','Boosts','Badges','XP Boosts'];
+  const CATS = ['Titles','Boosts','Badges','XP Boosts','Custom'];
 
   const purchase = (item) => {
     if (item.type === 'XPBoost') {
-      // XP boosts are single-use and don't need to be "owned" — just grant XP
       if (coins < item.cost) return;
-      dispatch({ type:'PURCHASE_REWARD', payload:{ id: item.id + '_' + Date.now(), cost: item.cost } });
+      dispatch({ type:'PURCHASE_REWARD', payload:{ id: item.id + '_' + Date.now(), cost: item.cost, item:{ ...item, type:'XPBoost' } } });
       addXP(item.xpGrant, 'reward');
       showNotif(`⚡ +${item.xpGrant} XP ABSORBED`);
       setJustBought(item.id);
       setTimeout(() => setJustBought(null), 2000);
     } else {
-      dispatch({ type:'PURCHASE_REWARD', payload:{ id: item.id, cost: item.cost } });
+      dispatch({ type:'PURCHASE_REWARD', payload:{ id: item.id, cost: item.cost, item } });
       if (item.type === 'StatBoost') {
         if (item.stat === 'all') {
           ['strength','intelligence','discipline','vitality','focus','charisma'].forEach(s =>
@@ -2362,60 +2600,67 @@ function RewardsScreen({ state, dispatch, addXP, showNotif }) {
           dispatch({ type:'GAIN_STAT', payload:{ stat:item.stat, amount:item.amount } });
         }
       }
-      showNotif(`✦ ${item.name.toUpperCase()} ACQUIRED`);
+      if (item.type === 'Title') {
+        dispatch({ type:'EQUIP_REWARD', payload:{ type:'Title', value:item.name } });
+        showNotif(`♛ TITLE "${item.name.toUpperCase()}" EQUIPPED`);
+      } else {
+        showNotif(`✦ ${item.name.toUpperCase()} ACQUIRED`);
+      }
       setJustBought(item.id);
       setTimeout(() => setJustBought(null), 2000);
     }
     setConfirmItem(null);
   };
 
-  const equipTitle = (item) => {
-    dispatch({ type:'EQUIP_REWARD', payload:{ type:'Title', value:item.name } });
-    showNotif(`✦ TITLE EQUIPPED`);
-  };
-  const equipBadge = (item) => {
-    dispatch({ type:'EQUIP_REWARD', payload:{ type:'Badge', value:item.name } });
-    showNotif(`✦ BADGE EQUIPPED`);
-  };
-
+  const equipTitle = (item) => { dispatch({ type:'EQUIP_REWARD', payload:{ type:'Title', value:item.name } }); showNotif('✦ TITLE EQUIPPED'); };
+  const equipBadge = (item) => { dispatch({ type:'EQUIP_REWARD', payload:{ type:'Badge', value:item.name } }); showNotif('✦ BADGE EQUIPPED'); };
   const filtered = REWARDS_CATALOG.filter(r => r.category === cat);
 
   return (
     <div style={{ height:'100%', display:'flex', flexDirection:'column' }}>
-      {/* Header */}
       <div style={{ padding:'12px 16px 0' }}>
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:10 }}>
           <div className="cinzel" style={{ fontSize:18, color:'var(--mana)', letterSpacing:3 }}>REWARD VAULT</div>
-          <div style={{
-            display:'flex', alignItems:'center', gap:6, padding:'6px 12px',
-            background:'rgba(243,156,18,0.1)', border:'1px solid rgba(243,156,18,0.3)',
-            borderRadius:20, boxShadow:'0 0 12px rgba(243,156,18,0.15)'
-          }}>
-            <span style={{ fontSize:14 }}>🪙</span>
-            <span className="cinzel" style={{ fontSize:14, color:'var(--gold)' }}>{coins.toLocaleString()}</span>
+          <div style={{ display:'flex', alignItems:'center', gap:6, padding:'6px 12px', background:'rgba(243,156,18,0.1)', border:'1px solid rgba(243,156,18,0.3)', borderRadius:20 }}>
+            <span>🪙</span><span className="cinzel" style={{ fontSize:14, color:'var(--gold)' }}>{coins.toLocaleString()}</span>
             <span style={{ fontSize:10, color:'var(--text-dim)' }}>COINS</span>
           </div>
         </div>
-        <div style={{ fontSize:11, color:'var(--text-dim)', marginBottom:12 }}>
-          Earn 1 coin per 50 XP gained. Spend wisely, Hunter.
-        </div>
-
-        {/* Category Tabs */}
+        <div style={{ fontSize:11, color:'var(--text-dim)', marginBottom:12 }}>Earn 1 coin per 50 XP gained. Spend wisely, Hunter.</div>
         <div style={{ display:'flex', gap:6, marginBottom:12, overflowX:'auto', paddingBottom:4 }}>
           {CATS.map(c=>(
-            <button key={c} onClick={()=>setCat(c)} style={{
-              padding:'6px 12px', fontSize:10, borderRadius:6, cursor:'pointer', whiteSpace:'nowrap',
-              border: cat===c ? '1px solid var(--mana)' : '1px solid var(--border)',
-              background: cat===c ? 'rgba(79,195,247,0.15)' : 'rgba(10,10,20,0.6)',
-              color: cat===c ? 'var(--mana)' : 'var(--text-dim)', fontFamily:'Cinzel,serif', letterSpacing:1
-            }}>{c.toUpperCase()}</button>
+            <button key={c} onClick={()=>setCat(c)} style={{ padding:'6px 12px', fontSize:10, borderRadius:6, cursor:'pointer', whiteSpace:'nowrap', border:cat===c?'1px solid var(--mana)':'1px solid var(--border)', background:cat===c?'rgba(79,195,247,0.15)':'rgba(10,10,20,0.6)', color:cat===c?'var(--mana)':'var(--text-dim)', fontFamily:'Cinzel,serif' }}>{c.toUpperCase()}</button>
           ))}
         </div>
       </div>
-
-      {/* Items Grid */}
       <div className="scrollable" style={{ flex:1, padding:'0 16px 16px' }}>
-        {filtered.map(item => {
+        {cat === 'Custom' && (
+          <>
+            <div style={{ fontSize:11, color:'var(--text-dim)', marginBottom:12, lineHeight:1.6 }}>Define real-world rewards you can earn by completing quests. Link them to quests in the Quest creation screen.</div>
+            <button className="btn-gold" style={{ width:'100%', marginBottom:16 }} onClick={()=>setShowCreateReward(true)}>+ CREATE CUSTOM REWARD</button>
+            {customRewards.length === 0 && (
+              <div style={{ textAlign:'center', padding:32, color:'var(--text-dim)' }}>
+                <div style={{ fontSize:32, marginBottom:12 }}>🎁</div>
+                <div className="cinzel" style={{ fontSize:14, marginBottom:8 }}>NO REWARDS YET</div>
+                <div style={{ fontSize:12, lineHeight:1.6 }}>Create real-world rewards and link them to quests as motivation.</div>
+              </div>
+            )}
+            {customRewards.map(r => (
+              <div key={r.id} className="panel" style={{ padding:16, marginBottom:10, borderColor:'rgba(243,156,18,0.25)' }}>
+                <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+                  <span style={{ fontSize:32 }}>{r.emoji}</span>
+                  <div style={{ flex:1 }}>
+                    <div className="cinzel" style={{ fontSize:14, color:'var(--gold)', marginBottom:2 }}>{r.name}</div>
+                    {r.desc && <div style={{ fontSize:12, color:'var(--text-dim)' }}>{r.desc}</div>}
+                    <div style={{ fontSize:10, color:'var(--text-dim)', marginTop:4 }}>{r.type==='real'?'🌍 Real-world':'🎮 Virtual'}</div>
+                  </div>
+                  <button onClick={()=>dispatch({ type:'DELETE_CUSTOM_REWARD', payload:r.id })} style={{ background:'none', border:'none', cursor:'pointer', color:'var(--crimson)', opacity:0.6, padding:8 }}><Trash2 size={14}/></button>
+                </div>
+              </div>
+            ))}
+          </>
+        )}
+        {cat !== 'Custom' && filtered.map(item => {
           const isOwned = item.type !== 'XPBoost' && owned.includes(item.id);
           const canAfford = coins >= item.cost;
           const rankOk = rankGte(hunterRank, item.minRank);
@@ -2423,74 +2668,26 @@ function RewardsScreen({ state, dispatch, addXP, showNotif }) {
           const isEquippedTitle = state.hunter.equippedTitle === item.name;
           const isEquippedBadge = state.hunter.equippedBadge === item.name;
           const justGot = justBought === item.id;
-
           return (
-            <div key={item.id} className="panel" style={{
-              padding:16, marginBottom:10,
-              borderColor: isOwned ? 'rgba(79,195,247,0.3)' : locked ? 'rgba(255,255,255,0.05)' : 'var(--border)',
-              opacity: locked ? 0.45 : 1,
-              transition:'all 0.3s',
-              boxShadow: justGot ? '0 0 30px rgba(243,156,18,0.5)' : 'none',
-              position:'relative', overflow:'hidden'
-            }}>
-              {/* Shimmer on just-bought */}
-              {justGot && <div style={{ position:'absolute', inset:0, background:'linear-gradient(90deg, transparent, rgba(243,156,18,0.15), transparent)', animation:'shimmer 0.8s ease-out' }}/>}
-
+            <div key={item.id} className="panel" style={{ padding:16, marginBottom:10, borderColor:isOwned?'rgba(79,195,247,0.3)':locked?'rgba(255,255,255,0.05)':'var(--border)', opacity:locked?0.45:1, transition:'all 0.3s', boxShadow:justGot?'0 0 30px rgba(243,156,18,0.5)':'none', position:'relative', overflow:'hidden' }}>
+              {justGot && <div style={{ position:'absolute', inset:0, background:'linear-gradient(90deg,transparent,rgba(243,156,18,0.15),transparent)', animation:'shimmer 0.8s ease-out' }}/>}
               <div style={{ display:'flex', alignItems:'flex-start', gap:12 }}>
-                <div style={{
-                  width:48, height:48, flexShrink:0, borderRadius:10, fontSize:24,
-                  display:'flex', alignItems:'center', justifyContent:'center',
-                  background: isOwned ? 'rgba(79,195,247,0.1)' : 'rgba(255,255,255,0.04)',
-                  border: isOwned ? '1px solid rgba(79,195,247,0.3)' : '1px solid rgba(255,255,255,0.08)',
-                  boxShadow: isOwned ? '0 0 12px rgba(79,195,247,0.2)' : 'none'
-                }}>
-                  {item.icon}
-                </div>
+                <div style={{ width:48, height:48, flexShrink:0, borderRadius:10, fontSize:24, display:'flex', alignItems:'center', justifyContent:'center', background:isOwned?'rgba(79,195,247,0.1)':'rgba(255,255,255,0.04)', border:isOwned?'1px solid rgba(79,195,247,0.3)':'1px solid rgba(255,255,255,0.08)' }}>{item.icon}</div>
                 <div style={{ flex:1 }}>
                   <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:3, flexWrap:'wrap' }}>
-                    <span className="cinzel" style={{ fontSize:13, color: isOwned ? 'var(--mana)' : 'var(--text)' }}>{item.name}</span>
-                    {isOwned && <span style={{ fontSize:9, color:'var(--mana)', border:'1px solid var(--mana)', padding:'1px 5px', borderRadius:3, letterSpacing:1 }}>OWNED</span>}
-                    {locked && <span style={{ fontSize:9, color:'var(--crimson)', border:'1px solid var(--crimson)', padding:'1px 5px', borderRadius:3 }}>{item.minRank}-RANK REQ</span>}
-                    {(isEquippedTitle || isEquippedBadge) && <span style={{ fontSize:9, color:'var(--gold)', border:'1px solid var(--gold)', padding:'1px 5px', borderRadius:3 }}>EQUIPPED</span>}
+                    <span className="cinzel" style={{ fontSize:13, color:isOwned?'var(--mana)':'var(--text)' }}>{item.name}</span>
+                    {isOwned && <span style={{ fontSize:9, color:'var(--mana)', border:'1px solid var(--mana)', padding:'1px 5px', borderRadius:3 }}>OWNED</span>}
+                    {locked && <span style={{ fontSize:9, color:'var(--crimson)', border:'1px solid var(--crimson)', padding:'1px 5px', borderRadius:3 }}>{item.minRank}-RANK</span>}
+                    {(isEquippedTitle||isEquippedBadge) && <span style={{ fontSize:9, color:'var(--gold)', border:'1px solid var(--gold)', padding:'1px 5px', borderRadius:3 }}>EQUIPPED</span>}
                   </div>
                   <div style={{ fontSize:12, color:'var(--text-dim)', marginBottom:8, lineHeight:1.4 }}>{item.desc}</div>
                   <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:8 }}>
-                    <div style={{ display:'flex', alignItems:'center', gap:6 }}>
-                      <span style={{ fontSize:13 }}>🪙</span>
-                      <span className="cinzel" style={{ fontSize:13, color: canAfford ? 'var(--gold)' : 'var(--crimson)' }}>{item.cost}</span>
-                    </div>
-                    {isOwned && item.type === 'Title' && (
-                      <button className={isEquippedTitle ? 'btn-gold' : 'btn-mana'} style={{ fontSize:10, padding:'5px 12px' }}
-                        onClick={()=>equipTitle(item)}>
-                        {isEquippedTitle ? '✓ EQUIPPED' : 'EQUIP'}
-                      </button>
-                    )}
-                    {isOwned && item.type === 'Badge' && (
-                      <button className={isEquippedBadge ? 'btn-gold' : 'btn-mana'} style={{ fontSize:10, padding:'5px 12px' }}
-                        onClick={()=>equipBadge(item)}>
-                        {isEquippedBadge ? '✓ EQUIPPED' : 'EQUIP'}
-                      </button>
-                    )}
-                    {isOwned && item.type === 'StatBoost' && (
-                      <span style={{ fontSize:11, color:'var(--mana)' }}>✓ Applied to stats</span>
-                    )}
-                    {(!isOwned || item.type === 'XPBoost') && !locked && (
-                      <button
-                        onClick={()=>setConfirmItem(item)}
-                        disabled={!canAfford}
-                        style={{
-                          fontSize:10, padding:'5px 14px', borderRadius:6, cursor: canAfford ? 'pointer' : 'not-allowed',
-                          border: `1px solid ${canAfford ? 'var(--gold)' : 'rgba(100,100,100,0.3)'}`,
-                          background: canAfford ? 'rgba(243,156,18,0.15)' : 'rgba(10,10,20,0.6)',
-                          color: canAfford ? 'var(--gold)' : 'var(--text-dim)', fontFamily:'Cinzel,serif',
-                          opacity: canAfford ? 1 : 0.5, transition:'all 0.2s'
-                        }}>
-                        {canAfford ? 'PURCHASE' : 'INSUFFICIENT'}
-                      </button>
-                    )}
-                    {locked && (
-                      <span style={{ fontSize:10, color:'var(--text-dim)' }}>Unlock at {item.minRank}-Rank</span>
-                    )}
+                    <div style={{ display:'flex', alignItems:'center', gap:6 }}><span>🪙</span><span className="cinzel" style={{ fontSize:13, color:canAfford?'var(--gold)':'var(--crimson)' }}>{item.cost}</span></div>
+                    {isOwned&&item.type==='Title' && <button className={isEquippedTitle?'btn-gold':'btn-mana'} style={{ fontSize:10, padding:'5px 12px' }} onClick={()=>equipTitle(item)}>{isEquippedTitle?'✓ EQUIPPED':'EQUIP'}</button>}
+                    {isOwned&&item.type==='Badge' && <button className={isEquippedBadge?'btn-gold':'btn-mana'} style={{ fontSize:10, padding:'5px 12px' }} onClick={()=>equipBadge(item)}>{isEquippedBadge?'✓ EQUIPPED':'EQUIP'}</button>}
+                    {isOwned&&item.type==='StatBoost' && <span style={{ fontSize:11, color:'var(--mana)' }}>✓ Applied</span>}
+                    {(!isOwned||item.type==='XPBoost')&&!locked && <button onClick={()=>setConfirmItem(item)} disabled={!canAfford} style={{ fontSize:10, padding:'5px 14px', borderRadius:6, cursor:canAfford?'pointer':'not-allowed', border:`1px solid ${canAfford?'var(--gold)':'rgba(100,100,100,0.3)'}`, background:canAfford?'rgba(243,156,18,0.15)':'rgba(10,10,20,0.6)', color:canAfford?'var(--gold)':'var(--text-dim)', fontFamily:'Cinzel,serif', opacity:canAfford?1:0.5 }}>{canAfford?'PURCHASE':'INSUFFICIENT'}</button>}
+                    {locked && <span style={{ fontSize:10, color:'var(--text-dim)' }}>Unlock at {item.minRank}-Rank</span>}
                   </div>
                 </div>
               </div>
@@ -2498,25 +2695,40 @@ function RewardsScreen({ state, dispatch, addXP, showNotif }) {
           );
         })}
       </div>
-
-      {/* Confirm Modal */}
+      {showCreateReward && (
+        <div className="modal-overlay" onClick={()=>setShowCreateReward(false)}>
+          <div className="modal-box" onClick={e=>e.stopPropagation()}>
+            <div className="cinzel" style={{ color:'var(--gold)', fontSize:16, marginBottom:16 }}>CREATE REWARD</div>
+            {[{k:'name',label:'Reward Name',ph:'Order pizza 🍕'},{k:'emoji',label:'Icon',ph:'🎁'},{k:'desc',label:'Description',ph:'After completing...'}].map(f=>(
+              <div key={f.k} style={{ marginBottom:12 }}>
+                <label style={{ display:'block', fontSize:11, color:'var(--text-dim)', marginBottom:6 }}>{f.label}</label>
+                <input className="input-dark" value={newReward[f.k]} onChange={e=>setNewReward(p=>({...p,[f.k]:e.target.value}))} placeholder={f.ph}/>
+              </div>
+            ))}
+            <div style={{ marginBottom:16 }}>
+              <label style={{ display:'block', fontSize:11, color:'var(--text-dim)', marginBottom:8 }}>TYPE</label>
+              <div style={{ display:'flex', gap:8 }}>
+                {[{v:'real',l:'🌍 Real-world'},{v:'virtual',l:'🎮 Virtual'}].map(t=>(
+                  <button key={t.v} onClick={()=>setNewReward(p=>({...p,type:t.v}))} style={{ flex:1, padding:'8px', borderRadius:6, cursor:'pointer', fontSize:12, border:newReward.type===t.v?'1px solid var(--gold)':'1px solid var(--border)', background:newReward.type===t.v?'rgba(243,156,18,0.15)':'transparent', color:newReward.type===t.v?'var(--gold)':'var(--text-dim)' }}>{t.l}</button>
+                ))}
+              </div>
+            </div>
+            <div style={{ display:'flex', gap:8 }}>
+              <button className="btn-gold" style={{ flex:1 }} onClick={()=>{ if(!newReward.name)return; dispatch({ type:'ADD_CUSTOM_REWARD', payload:{...newReward} }); setNewReward({name:'',emoji:'🎁',desc:'',type:'real'}); setShowCreateReward(false); showNotif('🎁 REWARD CREATED'); }}>CREATE</button>
+              <button className="btn-danger" onClick={()=>setShowCreateReward(false)}>CANCEL</button>
+            </div>
+          </div>
+        </div>
+      )}
       {confirmItem && (
         <div className="modal-overlay" onClick={()=>setConfirmItem(null)}>
           <div className="modal-box" onClick={e=>e.stopPropagation()} style={{ textAlign:'center' }}>
             <div style={{ fontSize:40, marginBottom:12 }}>{confirmItem.icon}</div>
             <div className="cinzel" style={{ fontSize:18, color:'var(--gold)', marginBottom:8 }}>{confirmItem.name}</div>
-            <div style={{ fontSize:13, color:'var(--text-dim)', marginBottom:20, lineHeight:1.6 }}>{confirmItem.desc}</div>
-            <div style={{ fontSize:14, color:'var(--text)', marginBottom:24 }}>
-              Cost: <span className="cinzel" style={{ color:'var(--gold)' }}>🪙 {confirmItem.cost}</span>
-              &nbsp;&nbsp;→&nbsp;&nbsp;
-              Remaining: <span className="cinzel" style={{ color: coins - confirmItem.cost >= 0 ? 'var(--mana)' : 'var(--crimson)' }}>
-                🪙 {coins - confirmItem.cost}
-              </span>
-            </div>
+            <div style={{ fontSize:13, color:'var(--text-dim)', marginBottom:20 }}>{confirmItem.desc}</div>
+            <div style={{ fontSize:14, color:'var(--text)', marginBottom:24 }}>Cost: <span className="cinzel" style={{ color:'var(--gold)' }}>🪙 {confirmItem.cost}</span> → Remaining: <span className="cinzel" style={{ color:coins-confirmItem.cost>=0?'var(--mana)':'var(--crimson)' }}>🪙 {coins-confirmItem.cost}</span></div>
             <div style={{ display:'flex', gap:10 }}>
-              <button className="btn-gold" style={{ flex:1, padding:'12px' }} onClick={()=>purchase(confirmItem)}>
-                CONFIRM PURCHASE
-              </button>
+              <button className="btn-gold" style={{ flex:1, padding:'12px' }} onClick={()=>purchase(confirmItem)}>CONFIRM PURCHASE</button>
               <button className="btn-danger" onClick={()=>setConfirmItem(null)}>CANCEL</button>
             </div>
           </div>
@@ -2526,9 +2738,7 @@ function RewardsScreen({ state, dispatch, addXP, showNotif }) {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// RESET MODAL
-// ─────────────────────────────────────────────────────────────────────────────
+
 function ResetModal({ onConfirm, onCancel }) {
   const [phase, setPhase] = useState('warn'); // 'warn' | 'type' | 'final'
   const [typed, setTyped] = useState('');
@@ -2604,18 +2814,920 @@ function ResetModal({ onConfirm, onCancel }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// BOSS FIGHT SCREEN
+// ─────────────────────────────────────────────────────────────────────────────
+const BOSS_TEMPLATES = [
+  { name:'The Procrastinator',  emoji:'🕰️', description:'Feeds on your wasted hours.',     difficulty:'E', baseHp:500,  xpReward:300,  color:'#6a7a9a' },
+  { name:'Lord of Distraction', emoji:'📱', description:'Steals your focus every second.',   difficulty:'D', baseHp:1000, xpReward:600,  color:'#4CAF50' },
+  { name:'The Comfort Zone',    emoji:'🛋️', description:'The most dangerous enemy of all.', difficulty:'C', baseHp:2000, xpReward:1200, color:'#4FC3F7' },
+  { name:'Shadow of Doubt',     emoji:'🌑', description:'Lives in the back of your mind.',   difficulty:'B', baseHp:4000, xpReward:2500, color:'#9B59B6' },
+  { name:'Fear of Failure',     emoji:'💀', description:'Has stopped more dreams than any.', difficulty:'A', baseHp:8000, xpReward:5000, color:'#F39C12' },
+  { name:'The Old Self',        emoji:'🪞', description:'The hardest boss — your past.',     difficulty:'S', baseHp:15000,xpReward:10000,color:'#E74C3C' },
+  { name:'Eternal Mediocrity',  emoji:'♾️', description:'The final demon. It never dies.',   difficulty:'MONARCH', baseHp:50000,xpReward:30000,color:'#FFD700' },
+];
+
+function BossScreen({ state, dispatch, addXP, showNotif }) {
+  const [showCreate, setShowCreate] = useState(false);
+  const [showFight, setShowFight] = useState(null);
+  const [attackAnim, setAttackAnim] = useState(false);
+  const [customBoss, setCustomBoss] = useState({ name:'', emoji:'👹', description:'', maxHp:1000, xpReward:500, color:'#E74C3C' });
+  const bosses = state.bosses || [];
+
+  const attackBoss = (boss) => {
+    // Damage based on relevant stats
+    const { stats } = state;
+    const baseDmg = Math.floor((stats.strength + stats.discipline + stats.focus) * (Math.random() * 0.5 + 0.75));
+    const isCrit = Math.random() < 0.15;
+    const damage = isCrit ? baseDmg * 3 : baseDmg;
+
+    setAttackAnim(true);
+    setTimeout(() => setAttackAnim(false), 500);
+
+    dispatch({ type:'ATTACK_BOSS', payload:{ id: boss.id, damage } });
+
+    const newHp = Math.max(0, boss.currentHp - damage);
+    if (newHp === 0 && !boss.defeated) {
+      // Boss defeated!
+      setTimeout(() => {
+        addXP(boss.xpReward, 'boss');
+        showNotif(`⚔️ BOSS DEFEATED! +${boss.xpReward} XP`);
+        setShowFight(null);
+      }, 600);
+    } else {
+      showNotif(isCrit ? `💥 CRITICAL! -${damage.toLocaleString()} HP` : `-${damage.toLocaleString()} HP`);
+    }
+  };
+
+  const activeBosses = bosses.filter(b => !b.defeated);
+  const defeatedBosses = bosses.filter(b => b.defeated);
+
+  return (
+    <div style={{ height:'100%', display:'flex', flexDirection:'column' }}>
+      <div style={{ padding:'12px 16px' }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
+          <div className="cinzel" style={{ fontSize:18, color:'var(--crimson)', letterSpacing:3 }}>⚔️ BOSS ARENA</div>
+          <button className="btn-danger" style={{ fontSize:10, padding:'5px 12px' }} onClick={()=>setShowCreate(true)}>+ SUMMON BOSS</button>
+        </div>
+        <div style={{ fontSize:11, color:'var(--text-dim)' }}>Defeat your inner enemies. Each boss represents a real obstacle.</div>
+      </div>
+
+      <div className="scrollable" style={{ flex:1, padding:'0 16px 16px' }}>
+        {/* Boss Templates */}
+        {activeBosses.length === 0 && (
+          <>
+            <div className="cinzel" style={{ fontSize:11, color:'var(--text-dim)', letterSpacing:2, marginBottom:12 }}>SPAWN A BOSS TO FIGHT</div>
+            {BOSS_TEMPLATES.map((t,i) => (
+              <div key={i} className="panel" style={{ padding:14, marginBottom:8, borderColor:`${t.color}33`, cursor:'pointer' }}
+                onClick={()=>{ dispatch({ type:'ADD_BOSS', payload:{ name:t.name, emoji:t.emoji, description:t.description, maxHp:t.baseHp, xpReward:t.xpReward, color:t.color, difficulty:t.difficulty } }); showNotif(`⚠️ ${t.name.toUpperCase()} HAS APPEARED`); }}>
+                <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+                  <span style={{ fontSize:28 }}>{t.emoji}</span>
+                  <div style={{ flex:1 }}>
+                    <div className="cinzel" style={{ fontSize:13, color:t.color }}>{t.name}</div>
+                    <div style={{ fontSize:11, color:'var(--text-dim)' }}>{t.description}</div>
+                  </div>
+                  <div style={{ textAlign:'right' }}>
+                    <div style={{ fontSize:10, color:t.color }}>{t.difficulty}-RANK</div>
+                    <div style={{ fontSize:10, color:'var(--gold)' }}>+{t.xpReward.toLocaleString()} XP</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </>
+        )}
+
+        {/* Active Bosses */}
+        {activeBosses.map(boss => {
+          const hpPct = (boss.currentHp / boss.maxHp) * 100;
+          const hpColor = hpPct > 60 ? '#2ECC71' : hpPct > 30 ? '#F39C12' : '#E74C3C';
+          return (
+            <div key={boss.id} className="panel" style={{ padding:16, marginBottom:12, borderColor:`${boss.color}55`, boxShadow:`0 0 20px ${boss.color}22` }}>
+              <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:12 }}>
+                <div className="boss-anim" style={{ fontSize:44, lineHeight:1 }}>{boss.emoji}</div>
+                <div style={{ flex:1 }}>
+                  <div className="cinzel" style={{ fontSize:15, color:boss.color, marginBottom:2 }}>{boss.name}</div>
+                  <div style={{ fontSize:11, color:'var(--text-dim)', marginBottom:8 }}>{boss.description}</div>
+                  <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, color:'var(--text-dim)', marginBottom:4 }}>
+                    <span>HP</span>
+                    <span style={{ color:hpColor }}>{boss.currentHp.toLocaleString()} / {boss.maxHp.toLocaleString()}</span>
+                  </div>
+                  <div style={{ height:10, background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.1)', borderRadius:5, overflow:'hidden' }}>
+                    <div style={{ height:'100%', width:`${hpPct}%`, background:`linear-gradient(90deg, ${hpColor}88, ${hpColor})`, borderRadius:5, transition:'width 0.5s ease-out', boxShadow:`0 0 8px ${hpColor}` }}/>
+                  </div>
+                </div>
+              </div>
+              <div style={{ display:'flex', gap:8 }}>
+                <button className="btn-danger" style={{ flex:1, padding:'10px', fontSize:13 }} onClick={()=>attackBoss(boss)}>
+                  ⚔️ ATTACK
+                </button>
+                <button onClick={()=>{ dispatch({ type:'DELETE_BOSS', payload:boss.id }); }} style={{ background:'none', border:'1px solid rgba(255,255,255,0.1)', borderRadius:6, color:'var(--text-dim)', fontSize:11, padding:'8px 12px', cursor:'pointer' }}>
+                  FLEE
+                </button>
+              </div>
+            </div>
+          );
+        })}
+
+        {/* Defeated Bosses */}
+        {defeatedBosses.length > 0 && (
+          <>
+            <div className="cinzel" style={{ fontSize:11, color:'var(--text-dim)', letterSpacing:2, margin:'16px 0 8px' }}>DEFEATED ✓</div>
+            {defeatedBosses.map(boss => (
+              <div key={boss.id} className="panel" style={{ padding:12, marginBottom:8, opacity:0.5, borderColor:'rgba(255,255,255,0.05)' }}>
+                <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                  <span style={{ fontSize:24, filter:'grayscale(1)' }}>{boss.emoji}</span>
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontSize:12, color:'var(--text-dim)', textDecoration:'line-through' }}>{boss.name}</div>
+                  </div>
+                  <span style={{ fontSize:11, color:'#2ECC71' }}>SLAIN ✓</span>
+                  <button onClick={()=>dispatch({ type:'DELETE_BOSS', payload:boss.id })} style={{ background:'none', border:'none', cursor:'pointer', color:'var(--text-dim)', padding:4 }}><X size={12}/></button>
+                </div>
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+
+      {/* Create Custom Boss */}
+      {showCreate && (
+        <div className="modal-overlay" onClick={()=>setShowCreate(false)}>
+          <div className="modal-box" onClick={e=>e.stopPropagation()}>
+            <div className="cinzel" style={{ color:'var(--crimson)', fontSize:16, marginBottom:16 }}>SUMMON CUSTOM BOSS</div>
+            {[
+              {k:'name', label:'Boss Name', ph:'My Bad Habit...'},
+              {k:'emoji', label:'Boss Icon (emoji)', ph:'👹'},
+              {k:'description', label:'What does it represent?', ph:'The enemy that holds me back...'},
+            ].map(f=>(
+              <div key={f.k} style={{ marginBottom:12 }}>
+                <label style={{ fontSize:11, color:'var(--text-dim)', display:'block', marginBottom:6 }}>{f.label}</label>
+                <input className="input-dark" value={customBoss[f.k]} onChange={e=>setCustomBoss(p=>({...p,[f.k]:e.target.value}))} placeholder={f.ph}/>
+              </div>
+            ))}
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginBottom:16 }}>
+              <div>
+                <label style={{ fontSize:11, color:'var(--text-dim)', display:'block', marginBottom:6 }}>MAX HP</label>
+                <input className="input-dark" type="number" value={customBoss.maxHp} onChange={e=>setCustomBoss(p=>({...p,maxHp:+e.target.value}))} style={{ padding:'8px' }}/>
+              </div>
+              <div>
+                <label style={{ fontSize:11, color:'var(--text-dim)', display:'block', marginBottom:6 }}>XP REWARD</label>
+                <input className="input-dark" type="number" value={customBoss.xpReward} onChange={e=>setCustomBoss(p=>({...p,xpReward:+e.target.value}))} style={{ padding:'8px' }}/>
+              </div>
+            </div>
+            <div style={{ display:'flex', gap:8 }}>
+              <button className="btn-danger" style={{ flex:1 }} onClick={()=>{
+                if(!customBoss.name) return;
+                dispatch({ type:'ADD_BOSS', payload:{ ...customBoss, difficulty:'CUSTOM' } });
+                setShowCreate(false);
+                showNotif(`⚠️ ${customBoss.name.toUpperCase()} HAS APPEARED`);
+              }}>SUMMON</button>
+              <button className="btn-mana" onClick={()=>setShowCreate(false)}>CANCEL</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RANK CARD — Social Sharing
+// ─────────────────────────────────────────────────────────────────────────────
+function RankCardModal({ state, onClose }) {
+  const canvasRef = useRef(null);
+  const { hunter, stats } = state;
+  const rankColor = RANK_COLORS[hunter.rank] || '#4FC3F7';
+  const isMonarch = hunter.rank === 'MONARCH';
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const W = 600, H = 320;
+    canvas.width = W; canvas.height = H;
+
+    // Background
+    ctx.fillStyle = '#050508';
+    ctx.fillRect(0, 0, W, H);
+
+    // Gradient overlay
+    const grad = ctx.createLinearGradient(0, 0, W, H);
+    grad.addColorStop(0, `${rankColor}22`);
+    grad.addColorStop(1, 'transparent');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+
+    // Border
+    ctx.strokeStyle = rankColor;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(1, 1, W-2, H-2);
+
+    // Inner glow border
+    ctx.strokeStyle = `${rankColor}44`;
+    ctx.lineWidth = 8;
+    ctx.strokeRect(4, 4, W-8, H-8);
+
+    // RANK big text
+    ctx.font = 'bold 120px Georgia, serif';
+    ctx.fillStyle = `${rankColor}18`;
+    ctx.textAlign = 'right';
+    ctx.fillText(isMonarch ? '♛' : hunter.rank, W - 30, H - 20);
+
+    // Hunter name
+    ctx.font = 'bold 36px Georgia, serif';
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'left';
+    ctx.fillText(hunter.name, 32, 56);
+
+    // Title
+    ctx.font = '16px Georgia, serif';
+    ctx.fillStyle = rankColor;
+    ctx.fillText((hunter.equippedTitle || hunter.title).toUpperCase(), 32, 84);
+
+    // Class line
+    ctx.font = '13px Courier New, monospace';
+    ctx.fillStyle = '#6a7a9a';
+    ctx.fillText(`${(hunter.class||'hunter').toUpperCase()} CLASS  ·  ${isMonarch ? '♛ MONARCH' : hunter.rank + '-RANK'}`, 32, 108);
+
+    // Divider
+    ctx.strokeStyle = `${rankColor}44`;
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(32, 122); ctx.lineTo(W-32, 122); ctx.stroke();
+
+    // Level + XP
+    ctx.font = 'bold 56px Georgia, serif';
+    ctx.fillStyle = '#4FC3F7';
+    ctx.textAlign = 'left';
+    ctx.fillText(`Lv. ${hunter.level}`, 32, 188);
+
+    // Stats row
+    const statList = [
+      ['STR', stats.strength, '#E74C3C'],
+      ['INT', stats.intelligence, '#4FC3F7'],
+      ['DIS', stats.discipline, '#9B59B6'],
+      ['VIT', stats.vitality, '#2ECC71'],
+      ['FOC', stats.focus, '#F39C12'],
+      ['CHA', stats.charisma, '#FF69B4'],
+    ];
+    ctx.font = 'bold 13px Courier New, monospace';
+    ctx.textAlign = 'left';
+    statList.forEach(([label, val, color], i) => {
+      const x = 32 + i * 92;
+      ctx.fillStyle = color;
+      ctx.fillText(`${label} ${val}`, x, 220);
+    });
+
+    // XP bar
+    const barW = W - 64;
+    const xpPct = hunter.xpToNextLevel > 0 ? Math.min(1, hunter.totalXP / hunter.xpToNextLevel) : 0;
+    ctx.fillStyle = 'rgba(79,195,247,0.1)';
+    ctx.fillRect(32, 240, barW, 10);
+    const barGrad = ctx.createLinearGradient(32, 0, 32 + barW * xpPct, 0);
+    barGrad.addColorStop(0, '#1565C0');
+    barGrad.addColorStop(1, '#4FC3F7');
+    ctx.fillStyle = barGrad;
+    ctx.fillRect(32, 240, barW * xpPct, 10);
+
+    ctx.font = '11px Courier New, monospace';
+    ctx.fillStyle = '#6a7a9a';
+    ctx.textAlign = 'left';
+    ctx.fillText(`${hunter.totalXP.toLocaleString()} / ${hunter.xpToNextLevel.toLocaleString()} XP`, 32, 268);
+
+    // Footer
+    ctx.font = '11px Georgia, serif';
+    ctx.fillStyle = `${rankColor}88`;
+    ctx.textAlign = 'right';
+    ctx.fillText('ARISE — SHADOW SYSTEM', W - 32, 300);
+
+  }, []);
+
+  const share = async () => {
+    const canvas = canvasRef.current;
+    const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+    const file = new File([blob], 'arise-rank-card.png', { type:'image/png' });
+    if (navigator.share && navigator.canShare({ files:[file] })) {
+      await navigator.share({ title:`${hunter.name} — ${hunter.rank}-RANK`, files:[file] });
+    } else {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'arise-rank-card.png';
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box rank-card-reveal" onClick={e=>e.stopPropagation()} style={{ maxWidth:640, textAlign:'center' }}>
+        <div className="cinzel" style={{ color:'var(--gold)', fontSize:16, marginBottom:16, letterSpacing:3 }}>YOUR RANK CARD</div>
+        <canvas ref={canvasRef} style={{ width:'100%', borderRadius:8, border:`1px solid ${RANK_COLORS[hunter.rank]}44` }}/>
+        <div style={{ display:'flex', gap:10, marginTop:16 }}>
+          <button className="btn-gold" style={{ flex:1, padding:'12px' }} onClick={share}>
+            📤 SHARE / DOWNLOAD
+          </button>
+          <button className="btn-mana" onClick={onClose}>CLOSE</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WORKOUT ASSISTANT
+// ─────────────────────────────────────────────────────────────────────────────
+const WORKOUT_LIBRARY = {
+  chest: ['Bench Press', 'Incline Dumbbell Press', 'Cable Flyes', 'Push-Ups', 'Chest Dips', 'Pec Deck Machine', 'Decline Bench Press'],
+  frontDelts: ['Front Raises', 'Overhead Press', 'Arnold Press', 'Cable Front Raise', 'Landmine Press'],
+  sideDelts: ['Lateral Raises', 'Cable Lateral Raise', 'Upright Row', 'Machine Lateral Raise', 'Dumbbell Shoulder Press'],
+  rearDelts: ['Reverse Pec Deck', 'Face Pulls', 'Bent-Over Lateral Raise', 'Band Pull-Aparts', 'Seated Cable Row (wide grip)'],
+  biceps: ['Barbell Curl', 'Hammer Curl', 'Incline Dumbbell Curl', 'Cable Curl', 'Concentration Curl', 'Preacher Curl'],
+  triceps: ['Skull Crushers', 'Tricep Pushdowns', 'Overhead Tricep Extension', 'Close-Grip Bench', 'Tricep Dips', 'Diamond Push-Ups'],
+  forearms: ['Wrist Curls', 'Reverse Curls', 'Dead Hangs', 'Farmer Carries', 'Plate Pinches'],
+  traps: ['Shrugs', 'Rack Pulls', 'Face Pulls', 'Upright Rows', 'Snatch-Grip Deadlift'],
+  lats: ['Pull-Ups', 'Lat Pulldown', 'Seated Cable Row', 'Single-Arm Dumbbell Row', 'T-Bar Row', 'Straight-Arm Pulldown'],
+  rhomboids: ['Bent-Over Row', 'Seated Cable Row', 'Face Pulls', 'Band Pull-Aparts', 'Chest-Supported Row'],
+  abs: ['Crunch', 'Hanging Leg Raises', 'Cable Crunch', 'Ab Wheel Rollout', 'Plank', 'Dragon Flag', 'Decline Crunch'],
+  obliques: ['Russian Twists', 'Side Plank', 'Wood Chops', 'Bicycle Crunch', 'Cable Side Bend'],
+  lowerBack: ['Deadlift', 'Good Mornings', 'Hyperextensions', 'Romanian Deadlift', 'Bird Dog'],
+  quads: ['Squat', 'Leg Press', 'Leg Extension', 'Hack Squat', 'Bulgarian Split Squat', 'Walking Lunges'],
+  hamstrings: ['Romanian Deadlift', 'Leg Curl', 'Stiff-Leg Deadlift', 'Nordic Curl', 'Glute-Ham Raise'],
+  glutes: ['Hip Thrust', 'Glute Kickback', 'Sumo Deadlift', 'Step-Ups', 'Cable Pull-Through', 'Donkey Kicks'],
+  calves: ['Standing Calf Raise', 'Seated Calf Raise', 'Donkey Calf Raise', 'Jump Rope', 'Single-Leg Calf Raise'],
+  hipFlexors: ['Hip Flexor Stretch', 'Mountain Climbers', 'Hanging Knee Raises', 'Cable Hip Flexion', 'Psoas March'],
+};
+
+const WORKOUT_TIPS = {
+  chest: 'Focus on full range of motion. Squeeze at the top. Keep shoulder blades retracted.',
+  frontDelts: 'Avoid swinging. Go slow on the way down. Don\'t go above shoulder height.',
+  sideDelts: 'Slight bend in elbows. Lead with elbows, not hands. Control the negative.',
+  rearDelts: 'High reps work best. Face pulls = shoulder health. Never skip these.',
+  biceps: 'Supinate at the top. Don\'t use momentum. Full stretch at the bottom.',
+  triceps: 'Triceps are 2/3 of arm size. Lockout matters. Keep elbows tucked.',
+  forearms: 'Often undertrained. Grip strength carries over to every pull exercise.',
+  traps: 'Full shrug up AND hold. Dead hangs also build grip and decompress spine.',
+  lats: 'Think "pull elbows to hips". Arch slightly. Full stretch at the top.',
+  rhomboids: 'Key for posture. Squeeze shoulder blades together hard at the peak.',
+  abs: 'Abs are built in the kitchen too. Brace hard. Control the movement.',
+  obliques: 'Don\'t neglect these — they protect your spine and build the V-taper.',
+  lowerBack: 'Never round under load. Hinge from hips. Deadlift = king of all exercises.',
+  quads: 'Knees over toes is fine. Full depth squats. Don\'t skip leg day.',
+  hamstrings: 'Most injuries happen here. Never skip. Romanian DL = best bang for buck.',
+  glutes: 'Largest muscle in body. Hip thrusts with heavy weight. Drive through heels.',
+  calves: 'Full stretch matters more than load. Slow negatives. High frequency works.',
+  hipFlexors: 'Sitting weakens these. Stretch daily. Tight hip flexors = back pain.',
+};
+
+function WorkoutAssistant({ muscleName, muscleData, onClose, onLogWorkout }) {
+  const [selectedEx, setSelectedEx] = useState('');
+  const [sets, setSets] = useState(4);
+  const [reps, setReps] = useState(10);
+  const [weight, setWeight] = useState('');
+  const exercises = WORKOUT_LIBRARY[muscleName] || [];
+  const tip = WORKOUT_TIPS[muscleName] || '';
+  const MUSCLE_NAMES = {
+    chest:'Chest', frontDelts:'Front Delts', sideDelts:'Side Delts', biceps:'Biceps',
+    triceps:'Triceps', abs:'Abs', obliques:'Obliques', quads:'Quads', calves:'Calves', forearms:'Forearms',
+    traps:'Traps', rearDelts:'Rear Delts', lats:'Lats', rhomboids:'Rhomboids',
+    lowerBack:'Lower Back', glutes:'Glutes', hamstrings:'Hamstrings', hipFlexors:'Hip Flexors'
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box" onClick={e=>e.stopPropagation()} style={{ maxWidth:460 }}>
+        <div className="cinzel" style={{ color:'var(--mana)', fontSize:16, marginBottom:4 }}>💪 WORKOUT ASSISTANT</div>
+        <div style={{ fontSize:12, color:'var(--gold)', marginBottom:16 }}>{MUSCLE_NAMES[muscleName]} — Lv.{muscleData?.level||0} | {muscleData?.trained||0} sessions</div>
+
+        {/* Pro Tip */}
+        <div className="panel" style={{ padding:12, marginBottom:16, borderColor:'rgba(155,89,182,0.3)' }}>
+          <div style={{ fontSize:10, color:'var(--violet)', letterSpacing:2, marginBottom:4 }}>💡 SYSTEM TIP</div>
+          <div style={{ fontSize:12, color:'var(--text)', lineHeight:1.6 }}>{tip}</div>
+        </div>
+
+        {/* Exercise Picker */}
+        <div style={{ marginBottom:12 }}>
+          <label style={{ fontSize:11, color:'var(--text-dim)', display:'block', marginBottom:8 }}>SELECT EXERCISE</label>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+            {exercises.map(ex => (
+              <button key={ex} onClick={()=>setSelectedEx(ex)} style={{
+                padding:'6px 10px', fontSize:11, borderRadius:6, cursor:'pointer',
+                border: selectedEx===ex ? '1px solid var(--mana)' : '1px solid var(--border)',
+                background: selectedEx===ex ? 'rgba(79,195,247,0.15)' : 'rgba(10,10,20,0.6)',
+                color: selectedEx===ex ? 'var(--mana)' : 'var(--text-dim)',
+                transition:'all 0.15s'
+              }}>{ex}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Sets / Reps / Weight */}
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8, marginBottom:16 }}>
+          {[{label:'SETS', val:sets, set:setSets},{label:'REPS', val:reps, set:setReps},{label:'KG (opt)', val:weight, set:setWeight}].map(f=>(
+            <div key={f.label}>
+              <label style={{ fontSize:10, color:'var(--text-dim)', display:'block', marginBottom:4 }}>{f.label}</label>
+              <input className="input-dark" type="number" value={f.val} onChange={e=>f.set(e.target.value)} style={{ padding:'8px 10px' }}/>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display:'flex', gap:8 }}>
+          <button className="btn-gold" style={{ flex:1 }} onClick={()=>{
+            if(!selectedEx) return;
+            onLogWorkout({ exercise:selectedEx, sets:+sets, reps:+reps, weight:weight||'' });
+          }}>⚡ LOG WORKOUT</button>
+          <button className="btn-mana" onClick={onClose}>BACK</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SETTINGS SCREEN — Theme, Notifications, Export, Data
+// ─────────────────────────────────────────────────────────────────────────────
+function SettingsScreen({ state, dispatch, showNotif }) {
+  const [notifTime, setNotifTime] = useState(state.notifications?.time || '08:00');
+
+  const exportData = () => {
+    const json = JSON.stringify(state, null, 2);
+    const blob = new Blob([json], { type:'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ARISE_backup_${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showNotif('💾 DATA EXPORTED');
+  };
+
+  const importData = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        dispatch({ type:'LOAD_STATE', payload:data });
+        showNotif('✅ DATA IMPORTED');
+      } catch(err) {
+        showNotif('❌ INVALID FILE');
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const requestNotifications = async () => {
+    if (!('Notification' in window)) {
+      showNotif('❌ NOT SUPPORTED'); return;
+    }
+    const perm = await Notification.requestPermission();
+    dispatch({ type:'SET_NOTIFICATIONS', payload:{ permission: perm, enabled: perm === 'granted' } });
+    if (perm === 'granted') showNotif('🔔 NOTIFICATIONS ENABLED');
+    else showNotif('❌ PERMISSION DENIED');
+  };
+
+  const toggleTheme = () => {
+    const newTheme = state.theme === 'dark' ? 'light' : 'dark';
+    dispatch({ type:'SET_THEME', payload: newTheme });
+    document.body.className = newTheme === 'light' ? 'light-theme' : '';
+  };
+
+  return (
+    <div style={{ height:'100%', display:'flex', flexDirection:'column' }}>
+      <div style={{ padding:'12px 16px' }}>
+        <div className="cinzel" style={{ fontSize:18, color:'var(--mana)', letterSpacing:3, marginBottom:4 }}>SYSTEM SETTINGS</div>
+      </div>
+
+      <div className="scrollable" style={{ flex:1, padding:'0 16px 24px' }}>
+
+        {/* Theme */}
+        <div className="panel" style={{ padding:16, marginBottom:12 }}>
+          <div className="cinzel" style={{ fontSize:11, color:'var(--text-dim)', letterSpacing:3, marginBottom:12 }}>🎨 APPEARANCE</div>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+            <div>
+              <div style={{ fontSize:13, color:'var(--text)' }}>{state.theme === 'dark' ? '🌑 Dark Mode' : '☀️ Light Mode'}</div>
+              <div style={{ fontSize:11, color:'var(--text-dim)' }}>Switch between Shadow and Light realm</div>
+            </div>
+            <button onClick={toggleTheme} style={{
+              padding:'8px 16px', borderRadius:20, cursor:'pointer', fontSize:12,
+              border: `1px solid ${state.theme==='dark' ? 'var(--mana)' : 'var(--gold)'}`,
+              background: state.theme==='dark' ? 'rgba(79,195,247,0.15)' : 'rgba(243,156,18,0.15)',
+              color: state.theme==='dark' ? 'var(--mana)' : 'var(--gold)',
+              fontFamily:'Cinzel,serif'
+            }}>
+              {state.theme === 'dark' ? 'GO LIGHT ☀️' : 'GO DARK 🌑'}
+            </button>
+          </div>
+        </div>
+
+        {/* Notifications */}
+        <div className="panel" style={{ padding:16, marginBottom:12 }}>
+          <div className="cinzel" style={{ fontSize:11, color:'var(--text-dim)', letterSpacing:3, marginBottom:12 }}>🔔 NOTIFICATIONS</div>
+          <div style={{ marginBottom:12 }}>
+            <div style={{ fontSize:13, color:'var(--text)', marginBottom:4 }}>Daily Quest Reminder</div>
+            <div style={{ fontSize:11, color:'var(--text-dim)', marginBottom:12 }}>
+              Status: <span style={{ color: state.notifications?.enabled ? '#2ECC71' : 'var(--crimson)' }}>
+                {state.notifications?.enabled ? '● ACTIVE' : '● OFF'}
+              </span>
+            </div>
+            {!state.notifications?.enabled && (
+              <button className="btn-mana" style={{ width:'100%', marginBottom:10 }} onClick={requestNotifications}>
+                ENABLE NOTIFICATIONS
+              </button>
+            )}
+            {state.notifications?.enabled && (
+              <>
+                <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, color:'var(--text-dim)', marginBottom:6 }}>
+                  <span>Reminder Time</span>
+                  <span style={{ color:'var(--mana)' }}>{notifTime}</span>
+                </div>
+                <input type="time" value={notifTime}
+                  onChange={e=>{ setNotifTime(e.target.value); dispatch({ type:'SET_NOTIFICATIONS', payload:{ time:e.target.value } }); }}
+                  style={{ background:'rgba(5,5,15,0.8)', border:'1px solid var(--border)', color:'var(--text)', borderRadius:6, padding:'8px 12px', width:'100%', fontSize:14 }}/>
+                <div style={{ fontSize:11, color:'var(--text-dim)', marginTop:8 }}>
+                  You'll receive a daily reminder to complete your quests at this time.
+                </div>
+                <button style={{ marginTop:10, background:'none', border:'1px solid var(--crimson)', borderRadius:6, color:'var(--crimson)', fontSize:11, padding:'6px 12px', cursor:'pointer' }}
+                  onClick={()=>dispatch({ type:'SET_NOTIFICATIONS', payload:{ enabled:false } })}>
+                  DISABLE
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Data Export/Import */}
+        <div className="panel" style={{ padding:16, marginBottom:12 }}>
+          <div className="cinzel" style={{ fontSize:11, color:'var(--text-dim)', letterSpacing:3, marginBottom:12 }}>💾 DATA MANAGEMENT</div>
+
+          <div style={{ marginBottom:12 }}>
+            <div style={{ fontSize:13, color:'var(--text)', marginBottom:4 }}>Export Backup</div>
+            <div style={{ fontSize:11, color:'var(--text-dim)', marginBottom:10 }}>Download all your progress as a JSON file. Keep it safe.</div>
+            <button className="btn-mana" style={{ width:'100%' }} onClick={exportData}>
+              📤 EXPORT ALL DATA
+            </button>
+          </div>
+
+          <div style={{ borderTop:'1px solid var(--border)', paddingTop:12 }}>
+            <div style={{ fontSize:13, color:'var(--text)', marginBottom:4 }}>Import Backup</div>
+            <div style={{ fontSize:11, color:'var(--text-dim)', marginBottom:10 }}>Restore from a previous backup file. ⚠️ This overwrites current data.</div>
+            <label style={{
+              display:'block', width:'100%', padding:'8px 16px', textAlign:'center',
+              background:'rgba(155,89,182,0.15)', border:'1px solid var(--violet)',
+              borderRadius:6, color:'var(--violet)', fontSize:12, cursor:'pointer',
+              fontFamily:'Cinzel,serif', letterSpacing:1
+            }}>
+              📥 IMPORT BACKUP
+              <input type="file" accept=".json" onChange={importData} style={{ display:'none' }}/>
+            </label>
+          </div>
+        </div>
+
+        {/* App Info */}
+        <div className="panel" style={{ padding:16, textAlign:'center' }}>
+          <div className="cinzel" style={{ fontSize:18, color:'var(--mana)', letterSpacing:4, marginBottom:4 }}>ARISE</div>
+          <div style={{ fontSize:11, color:'var(--text-dim)', letterSpacing:2 }}>SHADOW SYSTEM v2.0</div>
+          <div style={{ fontSize:11, color:'var(--text-dim)', marginTop:8, lineHeight:1.6 }}>
+            Hunter: <span style={{ color:'var(--text)' }}>{state.hunter.name}</span><br/>
+            Days Active: <span style={{ color:'var(--mana)' }}>{state.hunter.createdAt ? Math.floor((Date.now()-state.hunter.createdAt)/86400000) : 0}</span><br/>
+            Journal Entries: <span style={{ color:'var(--violet)' }}>{state.journal?.length || 0}</span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COLLECTION SCREEN
+// ─────────────────────────────────────────────────────────────────────────────
+function CollectionScreen({ state, dispatch }) {
+  const collection = state.collection || [];
+  const [filter, setFilter] = useState('all');
+
+  const FILTERS = [
+    { k:'all', l:'All' },
+    { k:'purchase', l:'Purchased' },
+    { k:'quest_reward', l:'Quest Rewards' },
+  ];
+
+  const filtered = filter === 'all' ? collection : collection.filter(i => i.source === filter);
+  const titles = collection.filter(i => i.type === 'Title' || i.category === 'Titles');
+  const equippedTitle = state.hunter.equippedTitle;
+
+  const TYPE_COLORS = {
+    Title: '#F39C12', Badge: '#9B59B6', StatBoost: '#E74C3C',
+    XPBoost: '#4FC3F7', Boosts: '#4FC3F7', real: '#2ECC71', virtual: '#4FC3F7'
+  };
+
+  return (
+    <div style={{ height:'100%', display:'flex', flexDirection:'column' }}>
+      <div style={{ padding:'12px 16px' }}>
+        <div className="cinzel" style={{ fontSize:18, color:'var(--gold)', letterSpacing:3, marginBottom:4 }}>COLLECTION</div>
+        <div style={{ fontSize:11, color:'var(--text-dim)', marginBottom:12 }}>All items, titles, and rewards you've earned.</div>
+
+        {/* Equipped Title Banner */}
+        {equippedTitle && (
+          <div style={{ padding:'10px 14px', marginBottom:12, background:'rgba(243,156,18,0.08)', border:'1px solid rgba(243,156,18,0.3)', borderRadius:8, display:'flex', alignItems:'center', gap:10 }}>
+            <span style={{ fontSize:18 }}>♛</span>
+            <div>
+              <div style={{ fontSize:10, color:'var(--text-dim)', letterSpacing:2 }}>ACTIVE TITLE</div>
+              <div className="cinzel" style={{ fontSize:14, color:'var(--gold)' }}>{equippedTitle}</div>
+            </div>
+          </div>
+        )}
+
+        {/* Filter Tabs */}
+        <div style={{ display:'flex', gap:6 }}>
+          {FILTERS.map(f=>(
+            <button key={f.k} onClick={()=>setFilter(f.k)} style={{
+              flex:1, padding:'6px 4px', fontSize:10, borderRadius:6, cursor:'pointer',
+              border: filter===f.k ? '1px solid var(--gold)' : '1px solid var(--border)',
+              background: filter===f.k ? 'rgba(243,156,18,0.15)' : 'transparent',
+              color: filter===f.k ? 'var(--gold)' : 'var(--text-dim)', fontFamily:'Cinzel,serif'
+            }}>{f.l}</button>
+          ))}
+        </div>
+      </div>
+
+      <div className="scrollable" style={{ flex:1, padding:'0 16px 24px' }}>
+        {/* Stats row */}
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8, marginBottom:16 }}>
+          {[
+            { l:'TOTAL', v:collection.length, c:'var(--gold)' },
+            { l:'TITLES', v:titles.length, c:'#F39C12' },
+            { l:'REWARDS', v:collection.filter(i=>i.source==='quest_reward').length, c:'#2ECC71' },
+          ].map(s=>(
+            <div key={s.l} className="panel" style={{ padding:'10px 8px', textAlign:'center' }}>
+              <div className="cinzel" style={{ fontSize:20, color:s.c }}>{s.v}</div>
+              <div style={{ fontSize:9, color:'var(--text-dim)', letterSpacing:2 }}>{s.l}</div>
+            </div>
+          ))}
+        </div>
+
+        {filtered.length === 0 && (
+          <div style={{ textAlign:'center', padding:40, color:'var(--text-dim)' }}>
+            <div style={{ fontSize:40, marginBottom:12 }}>📦</div>
+            <div className="cinzel" style={{ fontSize:14, marginBottom:8 }}>EMPTY</div>
+            <div style={{ fontSize:12, lineHeight:1.6 }}>Purchase items from the Reward Vault or complete quests with linked rewards to fill your collection.</div>
+          </div>
+        )}
+
+        {filtered.map((item, idx) => {
+          const isTitle = item.type === 'Title' || item.category === 'Titles';
+          const isEquipped = isTitle && equippedTitle === item.name;
+          const sourceColor = item.source === 'quest_reward' ? '#2ECC71' : 'var(--gold)';
+          const sourceLabel = item.source === 'quest_reward' ? `⚔️ ${item.questName || 'Quest Reward'}` : '🪙 Purchased';
+          const itemColor = TYPE_COLORS[item.type] || TYPE_COLORS[item.category] || 'var(--mana)';
+
+          return (
+            <div key={idx} className="panel" style={{
+              padding:14, marginBottom:10,
+              borderColor: isEquipped ? 'rgba(243,156,18,0.5)' : `${itemColor}33`,
+              boxShadow: isEquipped ? '0 0 16px rgba(243,156,18,0.2)' : 'none'
+            }}>
+              <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+                <div style={{ fontSize:28, width:40, textAlign:'center' }}>{item.icon || item.emoji || '✦'}</div>
+                <div style={{ flex:1 }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'wrap', marginBottom:2 }}>
+                    <span className="cinzel" style={{ fontSize:13, color: isEquipped ? 'var(--gold)' : itemColor }}>{item.name}</span>
+                    {isEquipped && <span style={{ fontSize:9, color:'var(--gold)', border:'1px solid var(--gold)', padding:'1px 5px', borderRadius:3 }}>ACTIVE</span>}
+                  </div>
+                  {item.desc && <div style={{ fontSize:11, color:'var(--text-dim)', marginBottom:4 }}>{item.desc}</div>}
+                  <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+                    <span style={{ fontSize:10, color:sourceColor }}>{sourceLabel}</span>
+                    {item.acquiredAt && <span style={{ fontSize:10, color:'var(--text-dim)' }}>· {new Date(item.acquiredAt).toLocaleDateString()}</span>}
+                  </div>
+                </div>
+                {/* Equip title button */}
+                {isTitle && !isEquipped && (
+                  <button className="btn-gold" style={{ fontSize:10, padding:'5px 10px' }}
+                    onClick={()=>dispatch({ type:'EQUIP_REWARD', payload:{ type:'Title', value:item.name } })}>
+                    EQUIP
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ANTI-TODO SCREEN
+// ─────────────────────────────────────────────────────────────────────────────
+function AntiTodoScreen({ state, dispatch, addXP, showNotif }) {
+  const [showAdd, setShowAdd] = useState(false);
+  const [newItem, setNewItem] = useState({ name:'', reason:'', category:'habits', severity:'medium' });
+  const antiTodo = state.antiTodo || [];
+
+  const CATEGORIES = [
+    { k:'habits', l:'Bad Habits', icon:'🚫', color:'#E74C3C' },
+    { k:'time', l:'Time Wasters', icon:'⏰', color:'#F39C12' },
+    { k:'food', l:'Food/Drink', icon:'🍔', color:'#9B59B6' },
+    { k:'mental', l:'Mental Traps', icon:'🧠', color:'#4FC3F7' },
+    { k:'social', l:'Social Traps', icon:'📱', color:'#2ECC71' },
+    { k:'custom', l:'Custom', icon:'⚡', color:'#FF69B4' },
+  ];
+
+  const SEVERITY = [
+    { k:'low', l:'Low', color:'#2ECC71', xp:25 },
+    { k:'medium', l:'Medium', color:'#F39C12', xp:50 },
+    { k:'high', l:'High', color:'#E74C3C', xp:100 },
+  ];
+
+  const kept = (item) => {
+    dispatch({ type:'KEEP_ANTI_TODO', payload: item.id });
+    const sev = SEVERITY.find(s=>s.k===item.severity) || SEVERITY[1];
+    addXP(sev.xp, 'antitodo');
+    showNotif(`💪 RESISTED! +${sev.xp} XP`);
+  };
+
+  const broke = (item) => {
+    dispatch({ type:'BREAK_ANTI_TODO', payload: item.id });
+    showNotif(`💔 RESISTANCE BROKEN`);
+  };
+
+  const catOf = (k) => CATEGORIES.find(c=>c.k===k) || CATEGORIES[5];
+  const sevOf = (k) => SEVERITY.find(s=>s.k===k) || SEVERITY[1];
+
+  const sorted = [...antiTodo].sort((a,b) => {
+    const order = { high:0, medium:1, low:2 };
+    return (order[a.severity]||1) - (order[b.severity]||1);
+  });
+
+  return (
+    <div style={{ height:'100%', display:'flex', flexDirection:'column' }}>
+      <div style={{ padding:'12px 16px' }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:4 }}>
+          <div className="cinzel" style={{ fontSize:18, color:'var(--crimson)', letterSpacing:3 }}>ANTI-TODO</div>
+          <button className="btn-danger" style={{ fontSize:10, padding:'5px 12px' }} onClick={()=>setShowAdd(true)}>+ ADD</button>
+        </div>
+        <div style={{ fontSize:11, color:'var(--text-dim)', marginBottom:8, lineHeight:1.6 }}>
+          Things you must <span style={{ color:'var(--crimson)' }}>NOT</span> do. Each time you resist, earn XP. Each time you break — the System judges you.
+        </div>
+        {antiTodo.length > 0 && (
+          <div style={{ display:'flex', gap:8 }}>
+            {[
+              { l:'RESISTED', v:antiTodo.reduce((s,a)=>(s+(a.streak||0)),0), c:'#2ECC71' },
+              { l:'BROKEN', v:antiTodo.reduce((s,a)=>(s+(a.breakCount||0)),0), c:'var(--crimson)' },
+              { l:'RATIO', v: antiTodo.reduce((s,a)=>(s+(a.streak||0)),0) + antiTodo.reduce((s,a)=>(s+(a.breakCount||0)),0) === 0 ? '-' :
+                Math.round(antiTodo.reduce((s,a)=>(s+(a.streak||0)),0) / (antiTodo.reduce((s,a)=>(s+(a.streak||0)),0) + antiTodo.reduce((s,a)=>(s+(a.breakCount||0)),0)) * 100) + '%',
+                c:'var(--mana)' },
+            ].map(s=>(
+              <div key={s.l} className="panel" style={{ flex:1, padding:'8px 6px', textAlign:'center' }}>
+                <div className="cinzel" style={{ fontSize:18, color:s.c }}>{s.v}</div>
+                <div style={{ fontSize:9, color:'var(--text-dim)', letterSpacing:1 }}>{s.l}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="scrollable" style={{ flex:1, padding:'0 16px 24px' }}>
+        {sorted.length === 0 && (
+          <div style={{ textAlign:'center', padding:40, color:'var(--text-dim)' }}>
+            <div style={{ fontSize:40, marginBottom:12 }}>🚫</div>
+            <div className="cinzel" style={{ fontSize:14, marginBottom:8 }}>NO FORBIDDEN ACTIONS</div>
+            <div style={{ fontSize:12, lineHeight:1.6 }}>
+              Add things you're trying to stop doing.<br/>
+              Every day you resist earns you XP.<br/>
+              This is how you defeat your demons.
+            </div>
+          </div>
+        )}
+
+        {sorted.map(item => {
+          const cat = catOf(item.category);
+          const sev = sevOf(item.severity);
+          const streak = item.streak || 0;
+          const breaks = item.breakCount || 0;
+
+          return (
+            <div key={item.id} className="panel" style={{
+              padding:16, marginBottom:12,
+              borderColor: `${sev.color}44`,
+              boxShadow: streak > 0 ? `0 0 12px ${sev.color}22` : 'none'
+            }}>
+              <div style={{ display:'flex', alignItems:'flex-start', gap:10, marginBottom:12 }}>
+                <span style={{ fontSize:24 }}>{cat.icon}</span>
+                <div style={{ flex:1 }}>
+                  <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:2, flexWrap:'wrap' }}>
+                    <span className="cinzel" style={{ fontSize:14, color:sev.color }}>{item.name}</span>
+                    <span style={{ fontSize:9, color:sev.color, border:`1px solid ${sev.color}55`, padding:'1px 5px', borderRadius:3 }}>{sev.l.toUpperCase()}</span>
+                  </div>
+                  {item.reason && <div style={{ fontSize:11, color:'var(--text-dim)', lineHeight:1.5 }}>{item.reason}</div>}
+                  <div style={{ display:'flex', gap:12, marginTop:6, fontSize:11 }}>
+                    <span style={{ color:'#2ECC71' }}>✓ {streak} resisted</span>
+                    <span style={{ color:'var(--crimson)' }}>✗ {breaks} broken</span>
+                    <span style={{ color:'var(--gold)' }}>+{sev.xp} XP/resist</span>
+                  </div>
+                </div>
+                <button onClick={()=>dispatch({ type:'DELETE_ANTI_TODO', payload:item.id })} style={{ background:'none', border:'none', cursor:'pointer', color:'var(--text-dim)', opacity:0.5, padding:4 }}>
+                  <X size={14}/>
+                </button>
+              </div>
+
+              {/* Streak bar */}
+              {(streak + breaks) > 0 && (
+                <div style={{ marginBottom:12 }}>
+                  <div style={{ height:6, background:'rgba(255,255,255,0.05)', borderRadius:3, overflow:'hidden' }}>
+                    <div style={{ height:'100%', width:`${streak/(streak+breaks)*100}%`, background:'linear-gradient(90deg, #1a7a30, #2ECC71)', borderRadius:3, transition:'width 0.5s' }}/>
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display:'flex', gap:8 }}>
+                <button onClick={()=>kept(item)} style={{
+                  flex:2, padding:'10px', borderRadius:6, cursor:'pointer', fontSize:12,
+                  background:'rgba(46,204,113,0.15)', border:'1px solid rgba(46,204,113,0.5)',
+                  color:'#2ECC71', fontFamily:'Cinzel,serif', letterSpacing:1
+                }}>💪 I RESISTED</button>
+                <button onClick={()=>broke(item)} style={{
+                  flex:1, padding:'10px', borderRadius:6, cursor:'pointer', fontSize:11,
+                  background:'rgba(231,76,60,0.1)', border:'1px solid rgba(231,76,60,0.3)',
+                  color:'var(--crimson)', fontFamily:'Courier New,monospace'
+                }}>💔 I BROKE</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {showAdd && (
+        <div className="modal-overlay" onClick={()=>setShowAdd(false)}>
+          <div className="modal-box" onClick={e=>e.stopPropagation()}>
+            <div className="cinzel" style={{ color:'var(--crimson)', fontSize:16, marginBottom:16 }}>ADD FORBIDDEN ACTION</div>
+            <div style={{ marginBottom:12 }}>
+              <label style={{ display:'block', fontSize:11, color:'var(--text-dim)', marginBottom:6 }}>WHAT TO AVOID</label>
+              <input className="input-dark" value={newItem.name} onChange={e=>setNewItem(p=>({...p,name:e.target.value}))} placeholder="Checking Instagram after 10pm..."/>
+            </div>
+            <div style={{ marginBottom:12 }}>
+              <label style={{ display:'block', fontSize:11, color:'var(--text-dim)', marginBottom:6 }}>WHY IT'S FORBIDDEN (optional)</label>
+              <input className="input-dark" value={newItem.reason} onChange={e=>setNewItem(p=>({...p,reason:e.target.value}))} placeholder="Destroys sleep quality..."/>
+            </div>
+            <div style={{ marginBottom:12 }}>
+              <label style={{ display:'block', fontSize:11, color:'var(--text-dim)', marginBottom:8 }}>CATEGORY</label>
+              <div style={{ display:'flex', flexWrap:'wrap', gap:6 }}>
+                {CATEGORIES.map(c=>(
+                  <button key={c.k} onClick={()=>setNewItem(p=>({...p,category:c.k}))} style={{
+                    padding:'5px 10px', fontSize:11, borderRadius:6, cursor:'pointer',
+                    border: newItem.category===c.k ? `1px solid ${c.color}` : '1px solid var(--border)',
+                    background: newItem.category===c.k ? `${c.color}22` : 'transparent',
+                    color: newItem.category===c.k ? c.color : 'var(--text-dim)'
+                  }}>{c.icon} {c.l}</button>
+                ))}
+              </div>
+            </div>
+            <div style={{ marginBottom:16 }}>
+              <label style={{ display:'block', fontSize:11, color:'var(--text-dim)', marginBottom:8 }}>SEVERITY & XP FOR RESISTING</label>
+              <div style={{ display:'flex', gap:8 }}>
+                {SEVERITY.map(s=>(
+                  <button key={s.k} onClick={()=>setNewItem(p=>({...p,severity:s.k}))} style={{
+                    flex:1, padding:'8px', borderRadius:6, cursor:'pointer', fontSize:11,
+                    border: newItem.severity===s.k ? `1px solid ${s.color}` : '1px solid var(--border)',
+                    background: newItem.severity===s.k ? `${s.color}22` : 'transparent',
+                    color: newItem.severity===s.k ? s.color : 'var(--text-dim)'
+                  }}>{s.l}<br/><span style={{ fontSize:10 }}>+{s.xp} XP</span></button>
+                ))}
+              </div>
+            </div>
+            <div style={{ display:'flex', gap:8 }}>
+              <button className="btn-danger" style={{ flex:1 }} onClick={()=>{
+                if(!newItem.name) return;
+                dispatch({ type:'ADD_ANTI_TODO', payload:{ ...newItem } });
+                setNewItem({ name:'', reason:'', category:'habits', severity:'medium' });
+                setShowAdd(false);
+                showNotif('🚫 FORBIDDEN ACTION ADDED');
+              }}>ADD TO ANTI-TODO</button>
+              <button className="btn-mana" onClick={()=>setShowAdd(false)}>CANCEL</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // NAVIGATION
 // ─────────────────────────────────────────────────────────────────────────────
 const NAV_TABS = [
-  { id:'status',  label:'STATUS',  icon: Home },
-  { id:'quests',  label:'QUESTS',  icon: Sword },
-  { id:'body',    label:'BODY',    icon: Dumbbell },
-  { id:'mind',    label:'MIND',    icon: Brain },
-  { id:'habits',  label:'HABITS',  icon: Flame },
-  { id:'routine', label:'ROUTINE', icon: Clock },
-  { id:'screen',  label:'SCREEN',  icon: Smartphone },
-  { id:'journal', label:'JOURNAL', icon: ScrollText },
-  { id:'rewards', label:'REWARDS', icon: Star },
+  { id:'status',     label:'STATUS',     icon: Home },
+  { id:'quests',     label:'QUESTS',     icon: Sword },
+  { id:'body',       label:'BODY',       icon: Dumbbell },
+  { id:'mind',       label:'MIND',       icon: Brain },
+  { id:'habits',     label:'HABITS',     icon: Flame },
+  { id:'routine',    label:'ROUTINE',    icon: Clock },
+  { id:'screen',     label:'SCREEN',     icon: Smartphone },
+  { id:'journal',    label:'JOURNAL',    icon: ScrollText },
+  { id:'rewards',    label:'REWARDS',    icon: Star },
+  { id:'boss',       label:'BOSS',       icon: Zap },
+  { id:'collection', label:'COLLECT',    icon: Trophy },
+  { id:'antitodo',   label:'ANTI-TODO',  icon: AlertTriangle },
+  { id:'settings',   label:'SETTINGS',   icon: Shield },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2629,12 +3741,17 @@ export default function App() {
   const [levelUpData, setLevelUpData] = useState(null);
   const [notif, setNotif] = useState(null);
   const [showReset, setShowReset] = useState(false);
+  const [showRankCard, setShowRankCard] = useState(false);
   const notifTimer = useRef(null);
 
   // Load state on mount
   useEffect(() => {
     loadState().then(saved => {
-      if (saved) dispatch({ type:'LOAD_STATE', payload:saved });
+      if (saved) {
+        dispatch({ type:'LOAD_STATE', payload:saved });
+        // Restore theme
+        if (saved.theme === 'light') document.body.className = 'light-theme';
+      }
       setLoaded(true);
     });
   }, []);
@@ -2644,10 +3761,39 @@ export default function App() {
     if (loaded) saveState(state);
   }, [state, loaded]);
 
+  // Apply theme changes
+  useEffect(() => {
+    document.body.className = state.theme === 'light' ? 'light-theme' : '';
+  }, [state.theme]);
+
   // Daily reset check
   useEffect(() => {
     dispatch({ type:'RESET_DAILY' });
   }, []);
+
+  // Schedule notification
+  useEffect(() => {
+    if (!state.notifications?.enabled || !state.notifications?.time) return;
+    const scheduleNotif = () => {
+      const [h, m] = state.notifications.time.split(':').map(Number);
+      const now = new Date();
+      const target = new Date();
+      target.setHours(h, m, 0, 0);
+      if (target <= now) target.setDate(target.getDate() + 1);
+      const delay = target - now;
+      return setTimeout(() => {
+        if (Notification.permission === 'granted') {
+          new Notification('⚔️ ARISE — Daily Quests Await', {
+            body: `${state.hunter.name}, your gates are open. Complete your daily quests.`,
+            icon: '/icon.png',
+            badge: '/icon.png',
+          });
+        }
+      }, delay);
+    };
+    const t = scheduleNotif();
+    return () => clearTimeout(t);
+  }, [state.notifications?.enabled, state.notifications?.time]);
 
   const addXP = useCallback((amount, source) => {
     dispatch({ type:'GAIN_XP', payload: amount });
@@ -2672,6 +3818,7 @@ export default function App() {
   const handleReset = async () => {
     dispatch({ type:'RESET_ALL' });
     try { await clearState(); } catch(e) {}
+    document.body.className = '';
     setShowReset(false);
   };
 
@@ -2705,25 +3852,28 @@ export default function App() {
           <div style={{ position:'absolute', bottom:'-10%', right:'10%', width:250, height:250, borderRadius:'50%', background:'radial-gradient(circle, rgba(155,89,182,0.04), transparent 70%)', filter:'blur(40px)' }}/>
         </div>
 
-        {/* Top Bar — coins + reset */}
+        {/* Top Bar */}
         <div style={{
           display:'flex', justifyContent:'space-between', alignItems:'center',
           padding:'6px 14px', background:'rgba(5,5,12,0.9)', borderBottom:'1px solid rgba(79,195,247,0.08)',
           zIndex:10, flexShrink:0
         }}>
-          {/* Coin display */}
           <div style={{ display:'flex', alignItems:'center', gap:5, cursor:'pointer' }} onClick={()=>setTab('rewards')}>
             <span style={{ fontSize:13 }}>🪙</span>
             <span className="cinzel" style={{ fontSize:12, color:'var(--gold)' }}>{(state.hunter.coins||0).toLocaleString()}</span>
             <span style={{ fontSize:9, color:'var(--text-dim)', letterSpacing:1 }}>COINS</span>
           </div>
-          {/* Hunter name / rank center */}
-          <div style={{ textAlign:'center' }}>
+          {/* Rank card share button */}
+          <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+            <button onClick={()=>setShowRankCard(true)} style={{
+              background:'none', border:'1px solid rgba(243,156,18,0.3)', borderRadius:5,
+              color:'rgba(243,156,18,0.7)', fontSize:9, padding:'4px 8px', cursor:'pointer',
+              fontFamily:'Cinzel,serif', letterSpacing:1
+            }}>🃏 CARD</button>
             <span className="cinzel" style={{ fontSize:11, color:'var(--text-dim)', letterSpacing:2 }}>
               {state.hunter.name} · Lv.{state.hunter.level}
             </span>
           </div>
-          {/* Reset button */}
           <button onClick={()=>setShowReset(true)} style={{
             background:'none', border:'1px solid rgba(231,76,60,0.25)', borderRadius:5,
             color:'rgba(231,76,60,0.6)', fontSize:9, padding:'4px 8px', cursor:'pointer',
@@ -2737,15 +3887,19 @@ export default function App() {
 
         {/* Content */}
         <div style={{ flex:1, overflow:'hidden', position:'relative', zIndex:1 }}>
-          {tab==='status'  && <StatusScreen {...screenProps}/>}
-          {tab==='quests'  && <QuestsScreen {...screenProps}/>}
-          {tab==='body'    && <BodyScreen {...screenProps}/>}
-          {tab==='mind'    && <MindScreen {...screenProps}/>}
-          {tab==='habits'  && <HabitsScreen {...screenProps}/>}
-          {tab==='routine' && <RoutineScreen {...screenProps}/>}
-          {tab==='screen'  && <ScreenTimeScreen {...screenProps}/>}
-          {tab==='journal' && <JournalScreen {...screenProps}/>}
-          {tab==='rewards' && <RewardsScreen {...screenProps}/>}
+          {tab==='status'   && <StatusScreen {...screenProps}/>}
+          {tab==='quests'   && <QuestsScreen {...screenProps}/>}
+          {tab==='body'     && <BodyScreen {...screenProps}/>}
+          {tab==='mind'     && <MindScreen {...screenProps}/>}
+          {tab==='habits'   && <HabitsScreen {...screenProps}/>}
+          {tab==='routine'  && <RoutineScreen {...screenProps}/>}
+          {tab==='screen'   && <ScreenTimeScreen {...screenProps}/>}
+          {tab==='journal'  && <JournalScreen {...screenProps}/>}
+          {tab==='rewards'    && <RewardsScreen {...screenProps}/>}
+          {tab==='boss'       && <BossScreen {...screenProps}/>}
+          {tab==='collection' && <CollectionScreen {...screenProps}/>}
+          {tab==='antitodo'   && <AntiTodoScreen {...screenProps}/>}
+          {tab==='settings'   && <SettingsScreen {...screenProps}/>}
         </div>
 
         {/* Bottom Nav */}
@@ -2757,9 +3911,9 @@ export default function App() {
             const Icon = t.icon;
             return (
               <div key={t.id} className={`nav-tab ${tab===t.id?'active':''}`} onClick={()=>setTab(t.id)}
-                style={{ minWidth: 56 }}>
-                <Icon size={16}/>
-                <span style={{ fontFamily:'Cinzel,serif', letterSpacing:0.5, fontSize:8 }}>{t.label}</span>
+                style={{ minWidth: 52 }}>
+                <Icon size={15}/>
+                <span style={{ fontFamily:'Cinzel,serif', letterSpacing:0.5, fontSize:7 }}>{t.label}</span>
               </div>
             );
           })}
@@ -2777,6 +3931,9 @@ export default function App() {
 
       {/* Reset Modal */}
       {showReset && <ResetModal onConfirm={handleReset} onCancel={()=>setShowReset(false)}/>}
+
+      {/* Rank Card */}
+      {showRankCard && <RankCardModal state={state} onClose={()=>setShowRankCard(false)}/>}
     </>
   );
 }
