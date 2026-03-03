@@ -1,0 +1,11 @@
+{
+  "appId": "com.arise.shadowsystem",
+  "appName": "ARISE",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}
